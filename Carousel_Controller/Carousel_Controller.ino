@@ -23,6 +23,11 @@ bool waitingForCommand = true;
 int stepCount = 0;
 unsigned long lastStepTime = 0;
 
+// Bypass mode variables for avoiding magnet stop condition
+bool bypassMode = false;
+int bypassStepsRemaining = 0;
+int bypassStepCount = 0;
+
 void setup() {
   // Configure motor pins
   pinMode(STEP_PIN, OUTPUT);
@@ -40,7 +45,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println("=== Carosel Controller ===");
   Serial.println("Commands:");
-  Serial.println("  'setup,[current],[half_current],[pulse/rev],[RPM]' - Configure motor");
+  Serial.println("  'setup,[RMS_current],[half_current],[pulse/rev],[RPM]' - Configure motor");
   Serial.println("    Example: setup,0.71,off,800,60");
   Serial.println("  'start' - Begin moving until magnet detected");
   Serial.println("  'next' - Move to next magnet position");
@@ -61,8 +66,8 @@ void loop() {
   
   // Handle motor movement
   if (isMoving && motorConfigured) {
-    // Check sensor before each step
-    if (digitalRead(SENSOR_PIN) == LOW) {
+    // Check sensor before each step (only if not in bypass mode)
+    if (!bypassMode && digitalRead(SENSOR_PIN) == LOW) {
       // Magnet detected - stop immediately
       stopMotor();
       Serial.println("MAGNET DETECTED! Motor stopped.");      
@@ -75,6 +80,17 @@ void loop() {
     // Take a step if enough time has passed
     if (micros() - lastStepTime >= currentDelay) {
       takeStep();
+      
+      // Handle bypass mode step counting
+      if (bypassMode) {
+        bypassStepCount++;
+        bypassStepsRemaining--;
+        
+        if (bypassStepsRemaining <= 0) {
+          bypassMode = false;
+          bypassStepCount = 0;
+        }
+      }
       
       // **FIXED: Handle both acceleration AND deceleration**
       if (stepCount % stepsPerAccel == 0) {
@@ -91,20 +107,30 @@ void handleCommands() {
     
     if (command.startsWith("setup,")) {
       parseSetupCommand(command);
-      
-    } else if (command == "start" || command == "next") {
+    }  
+    else if (command == "start" || command == "next") {
       if (!motorConfigured) {
         Serial.println("ERROR: Motor not configured! Use 'setup' command first.");
         return;
       }
-      if (!isMoving) {
-        startMotor();
-        Serial.print("Starting motor at ");
-        Serial.print(targetRPM);
-        Serial.print(" RPM ");
-        Serial.println(digitalRead(DIR_PIN) == LOW ? "(Clockwise)" : "(Counter-clockwise)");
+      
+      // Check if we're currently on a magnet
+      if (digitalRead(SENSOR_PIN) == LOW) {
+        // Start bypass mode to move past current magnet
+        int bypassSteps = int(pulsePerRev * 0.1); // 10% of total steps
+        Serial.print(" Steps to clear magnet");        
+        Serial.println(bypassSteps);
       } else {
-        Serial.println("Motor already running!");
+        // No magnet detected, start normal operation
+        if (!isMoving) {
+          startMotor();
+          Serial.print("Starting motor at ");
+          Serial.print(targetRPM);
+          Serial.print(" RPM ");
+          Serial.println(digitalRead(DIR_PIN) == LOW ? "(Clockwise)" : "(Counter-clockwise)");
+        } else {
+          Serial.println("Motor already running!");
+        }
       }
       
     } else if (command == "stop") {
@@ -182,7 +208,7 @@ void handleCommands() {
       printStatus();
       
     } else {
-      Serial.println("Commands: setup,[current],[half],[pulses],[rpm] | start | next | stop | reverse | rpm [value] | pulse [value] | mag | status");
+      Serial.println("Commands: setup,[RMS_current],[half_current],[pulse/rev],[RPM] | start | next | stop | reverse | rpm [value] | pulse [value] | mag | status");
     }
   }
 }
@@ -256,7 +282,7 @@ void parseSetupCommand(String command) {
     Serial.println("Motor ready! Use 'start' to begin.");
     
   } else {
-    Serial.println("ERROR: Format = setup,[current],[half_current(on/off)],[pulse/rev],[RPM]");
+    Serial.println("ERROR: Format = setup,[RMS_current],[half_current(on/off)],[pulse/rev],[RPM]");
     Serial.println("Example: setup,3.0,off,800,60");
   }
 }
@@ -328,6 +354,20 @@ void stopMotor() {
   isMoving = false;
   // Don't reset currentDelay here - preserve speed for restart
   stepCount = 0;
+  
+  // Reset bypass mode if stopping
+  bypassMode = false;
+  bypassStepsRemaining = 0;
+  bypassStepCount = 0;
+}
+
+void startBypassMode(int steps) {
+  bypassMode = true;
+  bypassStepsRemaining = steps;
+  bypassStepCount = 0;
+  
+  // Start motor movement for bypass
+  startMotor();
 }
 
 void takeStep() {
@@ -390,7 +430,12 @@ void printStatus() {
   }
   
   Serial.print("Motor State: ");
-  Serial.println(isMoving ? "MOVING" : "STOPPED");
+  if (isMoving) {
+    Serial.print("MOVING");
+  } else {
+    Serial.print("STOPPED");
+  }
+  Serial.println();
   
   if (isMoving) {
     float currentRPM = (1000000.0 / currentDelay) * 60.0 / pulsePerRev;
