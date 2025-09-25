@@ -1,12 +1,17 @@
+#include <Servo.h>
+
 #define STEP_PIN 7
 #define DIR_PIN 8
 #define ENABLE_PIN 4
-#define SENSOR_PIN 9
+#define MAG1_PIN 9
+#define MAG2_PIN 10
+#define SERVO1_PIN 11
+#define SERVO2_PIN 12
 
 // Motor control parameters
 int currentDelay = 1000; // Current step delay (microseconds)
 int minDelay = 100;      // Target speed delay (microseconds)
-int maxDelay = 5000;     // Start speed delay (microseconds)
+int maxDelay = 10000;     // Start speed delay (microseconds)
 int accelIncrement = 10; // Acceleration step size
 int stepsPerAccel = 50;  // Steps before changing speed
 
@@ -28,10 +33,14 @@ enum MagnetState
 {
   UNKNOWN,
   ON_MAGNET,
-  OFF_MAGNET
+  LEAVING_MAGNET, // Moving off the current magnet
+  SEEKING_MAGNET  // Looking for the next magnet
 };
 MagnetState magnetState = UNKNOWN;
-bool needToGetOffMagnet = false; // Flag for next command when starting on magnet
+
+// Servo objects
+Servo servo1;
+Servo servo2;
 
 void setup()
 {
@@ -41,7 +50,14 @@ void setup()
   pinMode(ENABLE_PIN, OUTPUT);
 
   // Configure sensor pin
-  pinMode(SENSOR_PIN, INPUT_PULLUP);
+  pinMode(MAG2_PIN, INPUT_PULLUP);
+  pinMode(MAG1_PIN, INPUT_PULLUP);
+
+  // Attach servos and set initial position
+  servo1.attach(SERVO1_PIN);
+  servo2.attach(SERVO2_PIN);
+  servo1.write(90); // Start in closed position
+  servo2.write(90); // Start in closed position
 
   // Initialize motor
   digitalWrite(ENABLE_PIN, LOW); // Enable driver
@@ -55,6 +71,8 @@ void setup()
   Serial.println("    Example: setup,0.71,off,800,60");
   Serial.println("  'init' - Initialize and align with first magnet");
   Serial.println("  'next' - Move to next magnet position");
+  Serial.println("  'open' - Open door (only when on magnet)");
+  Serial.println("  'close' - Close door (only when on magnet)");
   Serial.println("  'reverse' - Change direction");
   Serial.println("  'rpm [value]' - Set target RPM (1-300, works while running)");
   Serial.println("  'pulse [value]' - Set pulse/rev (200-25600, works while running)");
@@ -75,23 +93,58 @@ void loop()
   // Handle motor movement
   if (isMoving && motorConfigured)
   {
-    // Check sensor before each step
-    if (digitalRead(SENSOR_PIN) == LOW)
+    bool isMag1Present = (digitalRead(MAG1_PIN) == LOW);
+    bool isMag2Present = (digitalRead(MAG2_PIN) == LOW);
+
+    // State machine for magnet detection
+    switch (magnetState)
     {
-      // Magnet detected - handle based on state machine
-      handleMagnetDetection();
-      return;
+    case LEAVING_MAGNET:
+      // We are moving off the current magnet. Once the sensor is clear,
+      // we can start looking for the next one.
+      if (!isMag2Present)
+      {
+        Serial.println("INFO: Cleared current magnet, now seeking next one.");
+        magnetState = SEEKING_MAGNET;
+      }
+      break; // Keep moving
+
+    case SEEKING_MAGNET:
+      // We are actively looking for the next magnet (MAG2). Stop when found.
+      if (isMag2Present)
+      {
+        stopMotor();
+        magnetState = ON_MAGNET;
+        Serial.println("MAGNET DETECTED! Reached next magnet position.");
+        Serial.println("Send 'next' to continue...");
+        waitingForCommand = true;
+      }
+      break;
+
+    case UNKNOWN: // Used for the 'init' command - look for MAG1
+      if (isMag1Present)
+      {
+        stopMotor();
+        magnetState = ON_MAGNET;
+        Serial.println("MAG1 DETECTED! Initialized at home position.");
+        Serial.println("Send 'next' to move to next magnet...");
+        waitingForCommand = true;
+      }
+      break;
     }
 
-    // Take a step if enough time has passed
-    if (micros() - lastStepTime >= currentDelay)
+    // If the motor was not stopped by the state machine, take a step
+    if (isMoving)
     {
-      takeStep();
-
-      // **FIXED: Handle both acceleration AND deceleration**
-      if (stepCount % stepsPerAccel == 0)
+      if (micros() - lastStepTime >= currentDelay)
       {
-        adjustSpeedToTarget();
+        takeStep();
+
+        // Adjust speed towards target
+        if (stepCount % stepsPerAccel == 0)
+        {
+          adjustSpeedToTarget();
+        }
       }
     }
   }
@@ -103,6 +156,7 @@ void handleCommands()
   {
     String command = Serial.readString();
     command.trim();
+    command.toLowerCase(); // Standardize command input
 
     if (command.startsWith("setup,"))
     {
@@ -125,6 +179,32 @@ void handleCommands()
         return;
       }
       handleNextCommand();
+    }
+    else if (command == "open")
+    {
+      if (magnetState == ON_MAGNET)
+      {
+        servo1.write(0);
+        servo2.write(180);
+        Serial.println("Door opened.");
+      }
+      else
+      {
+        Serial.println("ERROR: Can only open door when on a magnet.");
+      }
+    }
+    else if (command == "close")
+    {
+      if (magnetState == ON_MAGNET)
+      {
+        servo1.write(90);
+        servo2.write(90);
+        Serial.println("Door closed.");
+      }
+      else
+      {
+        Serial.println("ERROR: Can only close door when on a magnet.");
+      }
     }
     else if (command == "stop")
     {
@@ -219,7 +299,7 @@ void handleCommands()
     }
     else
     {
-      Serial.println("Commands: setup,[RMS_current],[half_current],[pulse/rev],[RPM] | init | next | stop | reverse | rpm [value] | pulse [value] | mag | status");
+      Serial.println("Commands: setup,[RMS_current],[half_current],[pulse/rev],[RPM] | init | next | open | close | stop | reverse | rpm [value] | pulse [value] | mag | status");
     }
   }
 }
@@ -306,7 +386,7 @@ void parseSetupCommand(String command)
     Serial.print("Calculated Target Delay: ");
     Serial.print(minDelay);
     Serial.println("μs");
-    Serial.println("Motor ready! Use 'start' to begin.");
+    Serial.println("Motor ready! Use 'init' to begin.");
   }
   else
   {
@@ -343,7 +423,7 @@ void calculateOptimalDelays()
   stepsPerAccel = max(10, 1500 / targetRPM); // Slower RPM = longer accel
 }
 
-// **NEW FUNCTION: Handle both acceleration and deceleration**
+// **NEW FUNCTION: Handle both acceleration AND deceleration**
 void adjustSpeedToTarget()
 {
   if (currentDelay > minDelay)
@@ -423,17 +503,21 @@ void takeStep()
 
 void testSensor()
 {
-  Serial.println("Testing sensor for 10 seconds...");
+  Serial.println("Testing sensors for 10 seconds...");
   unsigned long startTime = millis();
 
   while (millis() - startTime < 10000)
   {
-    int sensorValue = digitalRead(SENSOR_PIN);
+    int mag1Value = digitalRead(MAG1_PIN);
+    int mag2Value = digitalRead(MAG2_PIN);
 
-    if (sensorValue == LOW)
+    if (mag1Value == LOW)
     {
-      Serial.println("MAGNET DETECTED!");
-      delay(500);
+      Serial.println("MAG1 DETECTED!");
+    }
+    else if (mag2Value == LOW)
+    {
+      Serial.println("MAG2 DETECTED!");
     }
     else
     {
@@ -491,8 +575,10 @@ void printStatus()
   Serial.print("Steps Taken: ");
   Serial.println(stepCount);
 
-  Serial.print("Sensor State: ");
-  Serial.println(digitalRead(SENSOR_PIN) == LOW ? "MAGNET DETECTED" : "No magnet");
+  Serial.print("MAG1 State: ");
+  Serial.println(digitalRead(MAG1_PIN) == LOW ? "DETECTED" : "Clear");
+  Serial.print("MAG2 State: ");
+  Serial.println(digitalRead(MAG2_PIN) == LOW ? "DETECTED" : "Clear");
 
   Serial.print("Magnet State: ");
   switch (magnetState)
@@ -503,42 +589,20 @@ void printStatus()
   case ON_MAGNET:
     Serial.println("ON_MAGNET");
     break;
-  case OFF_MAGNET:
-    Serial.println("OFF_MAGNET");
+  case LEAVING_MAGNET:
+    Serial.println("LEAVING_MAGNET");
+    break;
+  case SEEKING_MAGNET:
+    Serial.println("SEEKING_MAGNET");
     break;
   }
 
   Serial.println("=====================\n");
 }
 
-// Magnet state machine functions
-void handleMagnetDetection()
-{
-  stopMotor();
-
-  if (needToGetOffMagnet)
-  {
-    // We were trying to get off a magnet, now we're on the next one
-    needToGetOffMagnet = false;
-    magnetState = ON_MAGNET;
-    Serial.println("MAGNET DETECTED! Reached next magnet position.");
-    Serial.println("Send 'next' to continue to next magnet...");
-  }
-  else
-  {
-    // Normal magnet detection
-    magnetState = ON_MAGNET;
-    Serial.println("MAGNET DETECTED! Motor stopped.");
-    Serial.println("Send 'next' to continue to next magnet...");
-  }
-
-  waitingForCommand = true;
-  delay(100); // Debounce
-}
-
 void handleInitCommand()
 {
-  if (digitalRead(SENSOR_PIN) == LOW)
+  if (digitalRead(MAG1_PIN) == LOW)
   {
     // Already on a magnet
     magnetState = ON_MAGNET;
@@ -547,9 +611,7 @@ void handleInitCommand()
   }
   else
   {
-    // Not on a magnet, need to find one
-    magnetState = UNKNOWN;
-    needToGetOffMagnet = false;
+    // Not on a magnet, need to find one. State is already UNKNOWN.
     if (!isMoving)
     {
       startMotor();
@@ -570,8 +632,7 @@ void handleNextCommand()
   if (magnetState == ON_MAGNET)
   {
     // Currently on a magnet, need to get off it first
-    needToGetOffMagnet = true;
-    magnetState = OFF_MAGNET;
+    magnetState = LEAVING_MAGNET;
     if (!isMoving)
     {
       startMotor();
@@ -585,22 +646,9 @@ void handleNextCommand()
       Serial.println("Motor already running!");
     }
   }
-  else if (magnetState == OFF_MAGNET)
+  else if (magnetState == LEAVING_MAGNET || magnetState == SEEKING_MAGNET)
   {
-    // Between magnets, find the next one
-    needToGetOffMagnet = false;
-    if (!isMoving)
-    {
-      startMotor();
-      Serial.print("Moving to next magnet at ");
-      Serial.print(targetRPM);
-      Serial.print(" RPM ");
-      Serial.println(digitalRead(DIR_PIN) == LOW ? "(Clockwise)" : "(Counter-clockwise)");
-    }
-    else
-    {
-      Serial.println("Motor already running!");
-    }
+    Serial.println("INFO: Already searching for the next magnet.");
   }
   else // magnetState == UNKNOWN
   {
