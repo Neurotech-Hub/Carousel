@@ -9,17 +9,27 @@
 #define SERVO1_PIN 11
 #define SERVO2_PIN 12
 
+// Version
+const String VERSION = "v1.10";
+
 // Motor control parameters
 float targetStepsPerSecond = 0;  // Target speed in steps/second
-float maxAcceleration = 75;      // Gentle acceleration (steps/second²)
-float startingSpeed = 13.33;     // Starting speed ~1 RPM (for 800 pulse/rev)
+float maxAcceleration = 50;      // Gentle acceleration (steps/second²)
 
 // Motor configuration parameters (default values)
 float rmsCurrent = 3.2;       // RMS current setting (A)
 int pulsePerRev = 800;        // Pulses per revolution from driver setting
 bool halfCurrentMode = false; // Half current when stopped
 int targetRPM = 10;           // Target RPM speed
+int calibrationRPM = 8;       // Calibration RPM speed
 bool motorConfigured = true;  // Auto-configured with defaults
+
+// Calibration data
+int magnetIntervals[12];          // Step intervals: [0]=p1→p2, [1]=p2→p3, ..., [11]=p12→p1
+int currentPosition = 0;          // 0=uncalibrated, 1-12=calibrated position
+bool isCalibrated = false;        // Calibration status flag
+long currentStepPosition = 0;     // Track absolute stepper position for navigation
+int adjustmentSteps = 0;          // Adjustment Steps to feel discrepancy according to calibration speed
 
 // System state variables
 bool waitingForCommand = true;
@@ -68,15 +78,18 @@ void setup()
   stepper.setSpeed(0);           // Start stopped
 
   Serial.begin(115200);
-  Serial.println("=== Carousel Controller ===");
+  Serial.print("=== Carousel Controller ");
+  Serial.print(VERSION);
+  Serial.println(" ===");
   Serial.println("Commands:");
   Serial.println("  'setup,[RMS_current],[full_current],[pulse/rev],[RPM]' - Configure motor (optional)");
-  Serial.println("    Example: setup,0.71,off,800,60");
-  Serial.println("  'init' - Initialize and align with first magnet");
-  Serial.println("  'next' - Move to next magnet position");
+  Serial.println("    Example: setup,3.2,off,800,10");
+  Serial.println("  'cal' - Calibrate system (find MAG1, record all 12 positions)");
+  Serial.println("  'p1' to 'p12' - Move to specific position (shortest path)");
   Serial.println("  'open' - Open door (only when on magnet)");
   Serial.println("  'close' - Close door (only when on magnet)");
-  Serial.println("  'rpm [value]' - Set target RPM (1-30, works while running)");
+  Serial.println("  'stop' or 's' - Emergency stop");
+  Serial.println("  'rpm [value]' - Set target RPM (1-30)");
   Serial.println("  'mag' - Test sensor reading");
   Serial.println("  'status' - Show system status");
   Serial.println();
@@ -90,8 +103,9 @@ void setup()
   Serial.println(pulsePerRev);
   Serial.print("Target RPM: ");
   Serial.println(targetRPM);
-  Serial.println("Ready to use! Send 'init' to begin or 'setup' to change configuration.");
-  Serial.println("Magnet state: UNKNOWN");
+  Serial.println();
+  Serial.println("⚠️  IMPORTANT: Run 'cal' command first to calibrate the system!");
+  Serial.println("Status: NOT CALIBRATED");
 
   // Calculate default speed settings
   updateMotorSpeed();
@@ -101,77 +115,14 @@ void setup()
 
 void loop()
 {
-  // Handle serial commands
+  // Handle serial commands (non-blocking)
   handleCommands();
 
-  // Handle motor movement with AccelStepper
+  // Run the stepper - this handles all acceleration/deceleration automatically
+  // This must be called frequently for smooth motor operation
   if (motorConfigured)
   {
-    bool isMag1Present = (digitalRead(MAG1_PIN) == LOW);
-    bool isMag2Present = (digitalRead(MAG2_PIN) == LOW);
-
-    // State machine for magnet detection
-    switch (magnetState)
-    {
-    case LEAVING_MAGNET:
-      // We are moving off the current magnet. Once both sensors are clear,
-      // we can start looking for the next one.
-      if (!isMag1Present && !isMag2Present)
-      {
-        Serial.println("INFO: Cleared current magnet, now seeking next one.");
-        magnetState = SEEKING_MAGNET;
-        // Ramp up to target speed for seeking
-        stepper.setSpeed(targetStepsPerSecond);
-      }
-      break; // Keep moving
-
-    case SEEKING_MAGNET:
-      // We are actively looking for the next magnet (either MAG1 or MAG2). Stop when found.
-      if (isMag1Present || isMag2Present)
-      {
-        stopMotorGently(); // Gentle deceleration
-        magnetState = ON_MAGNET;
-        if (isMag1Present)
-        {
-          Serial.println("MAG1 DETECTED! Reached magnet position.");
-        }
-        else
-        {
-          Serial.println("MAG2 DETECTED! Reached magnet position.");
-        }
-        Serial.println("Send 'next' to continue...");
-        waitingForCommand = true;
-      }
-      break;
-
-    case UNKNOWN: // Used for the 'init' command - look for MAG1 only
-      if (isMag1Present)
-      {
-        stopMotorGently(); // Gentle deceleration
-        magnetState = ON_MAGNET;
-        Serial.println("MAG1 DETECTED! Initialized at home position.");
-        Serial.println("Send 'next' to move to next magnet...");
-        waitingForCommand = true;
-      }
-      break;
-    }
-
-    // Run the stepper - this handles all acceleration/deceleration automatically
-    bool stepperRunning = stepper.run();
-    
-    // Check if the motor has stopped on a magnet AND the door cycle is armed
-    if (!stepperRunning && magnetState == ON_MAGNET && isDoorCycleArmed)
-    {
-        Serial.println("Motor stopped. Starting automatic door cycle...");
-        automaticDoorCycle();
-        isDoorCycleArmed = false; // Disarm after cycle runs to prevent re-triggering
-    }
-    
-    // Print progress while moving
-    if (stepperRunning && !waitingForCommand)
-    {
-      printProgress();
-    }
+    stepper.run();
   }
 }
 
@@ -218,23 +169,27 @@ void processCommand(String command)
   {
     parseSetupCommand(command);
   }
-  else if (command == "init")
+  else if (command == "cal")
   {
     if (!motorConfigured)
     {
       Serial.println("ERROR: Motor not configured! Use 'setup' command first.");
       return;
     }
-    handleInitCommand();
+    handleCalibrationCommand();
   }
-  else if (command == "next")
+  else if (command.startsWith("p") && command.length() >= 2)
   {
-    if (!motorConfigured)
+    // Handle position commands p1-p12
+    int position = command.substring(1).toInt();
+    if (position >= 1 && position <= 12)
     {
-      Serial.println("ERROR: Motor not configured! Use 'setup' command first.");
-      return;
+      handlePositionCommand(position);
     }
-    handleNextCommand();
+    else
+    {
+      Serial.println("ERROR: Position must be p1 to p12");
+    }
   }
   else if (command == "open")
   {
@@ -303,7 +258,7 @@ void processCommand(String command)
   }
   else
   {
-    Serial.println("Commands: setup,[RMS_current],[full_current],[pulse/rev],[RPM] | init | next | open | close | stop | rpm [value] | mag | status");
+    Serial.println("Commands: cal | p1-p12 | open | close | stop/s | rpm [value] | mag | status | setup,[RMS_current],[full_current],[pulse/rev],[RPM]");
   }
 }
 
@@ -436,51 +391,10 @@ void updateMotorSpeed()
   }
 }
 
-void startMotor()
-{
-  waitingForCommand = false;
-  // Ensure maxSpeed is set correctly before starting
-  stepper.setMaxSpeed(targetStepsPerSecond);
-  // Start at slow speed and ramp up to target
-  stepper.setSpeed(startingSpeed);  // Start at ~1 RPM
-  stepper.move(1000000);  // Move a very large number of steps (continuous movement)
-}
-
 void stopMotor()
 {
   stepper.stop();  // AccelStepper handles smooth deceleration
   waitingForCommand = true;
-}
-
-void stopMotorGently()
-{
-  // For magnet detection - move just a few more steps to decelerate smoothly
-  long currentPos = stepper.currentPosition();
-  stepper.moveTo(currentPos);
-  waitingForCommand = true;
-}
-
-void printProgress()
-{
-  // Print progress periodically
-  static unsigned long lastPrintTime = 0;
-  unsigned long currentTime = millis();
-  
-  if (currentTime - lastPrintTime > 2000) // Print every 2 seconds
-  {
-    float currentSpeed = stepper.speed();
-    float currentRPM = (currentSpeed * 60.0) / pulsePerRev;
-    Serial.print("Position: ");
-    Serial.print(stepper.currentPosition());
-    Serial.print(" | Current RPM: ");
-    Serial.print(currentRPM, 1);
-    Serial.print(" | Target: ");
-    Serial.print(targetRPM);
-    Serial.print(" | Speed: ");
-    Serial.print(currentSpeed, 1);
-    Serial.println(" steps/sec");
-    lastPrintTime = currentTime;
-  }
 }
 
 // Servo control functions with speed control
@@ -508,7 +422,6 @@ void openDoor()
   Serial.println("Opening door...");
   moveServoSlow(servo1, 0);   // servo1 to 0 degrees
   moveServoSlow(servo2, 180); // servo2 to 180 degrees
-  Serial.println("Door opened.");
 }
 
 void closeDoor()
@@ -516,7 +429,6 @@ void closeDoor()
   Serial.println("Closing door...");
   moveServoSlow(servo1, 90);  // servo1 to 90 degrees
   moveServoSlow(servo2, 90);  // servo2 to 90 degrees
-  Serial.println("Door closed.");
 }
 
 void automaticDoorCycle()
@@ -538,15 +450,15 @@ void testSensor()
 
     if (mag1Value == LOW)
     {
-      Serial.println("MAG1 DETECTED!");
+      Serial.println("Home sensor detected!");
     }
     else if (mag2Value == LOW)
     {
-      Serial.println("MAG2 DETECTED!");
+      Serial.println("Position sensor detected!");
     }
     else
     {
-      Serial.println("No magnet");
+      Serial.println("No sensor detected");
     }
     delay(300);
   }
@@ -556,6 +468,9 @@ void testSensor()
 void printStatus()
 {
   Serial.println("\n=== SYSTEM STATUS ===");
+  Serial.print("Version: ");
+  Serial.println(VERSION);
+  
   Serial.print("Motor Configured: ");
   Serial.println(motorConfigured ? "YES" : "NO");
 
@@ -571,6 +486,20 @@ void printStatus()
     Serial.print("Target Speed (steps/sec): ");
     Serial.print(targetStepsPerSecond, 1);
     Serial.println(" steps/sec");
+  }
+  
+  Serial.println();
+  Serial.print("Calibration Status: ");
+  if (isCalibrated)
+  {
+    Serial.println("CALIBRATED ✓");
+    Serial.print("Current Position: p");
+    Serial.println(currentPosition);
+  }
+  else
+  {
+    Serial.println("NOT CALIBRATED ⚠️");
+    Serial.println("Run 'cal' command to calibrate the system.");
   }
 
   Serial.print("Motor State: ");
@@ -603,36 +532,14 @@ void printStatus()
   else
     Serial.println("Stopped");
 
-  Serial.print("Current Position: ");
+  Serial.print("Stepper Position: ");
   Serial.println(stepper.currentPosition());
 
-  Serial.print("MAG1 State: ");
+  Serial.print("Home Sensor: ");
   Serial.println(digitalRead(MAG1_PIN) == LOW ? "DETECTED" : "Clear");
-  Serial.print("MAG2 State: ");
+  Serial.print("Position Sensor: ");
   Serial.println(digitalRead(MAG2_PIN) == LOW ? "DETECTED" : "Clear");
   
-  // Show which magnet is currently detected when on a magnet
-  if (magnetState == ON_MAGNET)
-  {
-    Serial.print("Currently on: ");
-    if (digitalRead(MAG1_PIN) == LOW && digitalRead(MAG2_PIN) == LOW)
-    {
-      Serial.println("Both MAG1 and MAG2");
-    }
-    else if (digitalRead(MAG1_PIN) == LOW)
-    {
-      Serial.println("MAG1");
-    }
-    else if (digitalRead(MAG2_PIN) == LOW)
-    {
-      Serial.println("MAG2");
-    }
-    else
-    {
-      Serial.println("Unknown (no magnet detected)");
-    }
-  }
-
   Serial.print("Magnet State: ");
   switch (magnetState)
   {
@@ -653,68 +560,258 @@ void printStatus()
   Serial.println("=====================\n");
 }
 
-void handleInitCommand()
+void handleCalibrationCommand()
 {
-  isDoorCycleArmed = true; // This movement command permits the door cycle
-  // Stop any current movement and reset state
-  stopMotor();
-  magnetState = UNKNOWN;
-  waitingForCommand = false;
+  Serial.println("\n=== CALIBRATION START ===");
+  Serial.println("Finding Home Position...");
   
-  Serial.println("INIT: Resetting to find MAG1 home position...");
+  // Reset calibration data
+  isCalibrated = false;
+  currentPosition = 0;
+  magnetState = UNKNOWN;
+  
+  // Set calibration speed (8 RPM)
+  int savedRPM = targetRPM;
+  targetRPM = calibrationRPM;
+  calculateOptimalSpeed();
+  stepper.setMaxSpeed(targetStepsPerSecond);
+  
+  // Search for MAG1
+  stepper.setCurrentPosition(0);
+  currentStepPosition = 0;
   
   if (digitalRead(MAG1_PIN) == LOW)
   {
-    // Already on MAG1 - confirm position and trigger door cycle
-    magnetState = ON_MAGNET;
-    Serial.println("MAG1 DETECTED! Already at home position.");
-    Serial.println("Send 'next' to move to next magnet...");
-    waitingForCommand = true;
-    // Trigger automatic door cycle since motor is already stopped
-    Serial.println("Motor already stopped. Starting automatic door cycle...");
-    automaticDoorCycle();
-    isDoorCycleArmed = false; // Disarm the flag immediately to prevent re-triggering
+    Serial.println("Already at home position.");
+    Serial.println("Starting full rotation to record intervals...");
   }
   else
   {
-    // Not on MAG1, need to find it
-    startMotor();
-      Serial.print("Initializing - searching for MAG1 at ");
-      Serial.print(targetRPM);
-      Serial.print(" RPM (");
-      Serial.print(targetStepsPerSecond, 1);
-      Serial.println(" steps/sec)");
+    Serial.println("Searching for home position...");
+    // Move until MAG1 found
+    stepper.setSpeed(targetStepsPerSecond);
+    stepper.move(100000); // Large number
+    
+    while (digitalRead(MAG1_PIN) != LOW)
+    {
+      stepper.run();
+    }
+    
+    // Stop gently at MAG1
+    long currentPos = stepper.currentPosition();
+    stepper.moveTo(currentPos);
+    while (stepper.run()) {} // Wait for stop
+    
+    Serial.println("Home position found.");
+    Serial.println("Starting full rotation to record intervals...");
+  }
+  
+  // Reset position counter at MAG1
+  stepper.setCurrentPosition(0);
+  currentStepPosition = 0;
+  long lastMagnetPosition = 0;
+  int magnetCount = 0;
+  
+  // Move off MAG1
+  stepper.move(100000);
+  stepper.setSpeed(targetStepsPerSecond);
+  while (digitalRead(MAG1_PIN) == LOW || digitalRead(MAG2_PIN) == LOW)
+  {
+    stepper.run();
+  }
+  
+  Serial.println("Cleared home position, now recording positions...");
+  
+  // Record intervals for full rotation
+  bool lastMag1State = false;
+  bool lastMag2State = false;
+  
+  while (magnetCount < 12)
+  {
+    stepper.run();
+    bool mag1Detected = (digitalRead(MAG1_PIN) == LOW);
+    bool mag2Detected = (digitalRead(MAG2_PIN) == LOW);
+    
+    // Detect rising edge (entering magnet)
+    if ((mag1Detected || mag2Detected) && (!lastMag1State && !lastMag2State))
+    {
+      long currentPos = stepper.currentPosition();
+      magnetIntervals[magnetCount] = currentPos - lastMagnetPosition;
+      
+      Serial.print("Box ");
+      Serial.print(magnetCount + 1);
+      Serial.print(" detected at position ");
+      Serial.print(currentPos);
+      Serial.print(" (interval: ");
+      Serial.print(magnetIntervals[magnetCount]);
+      Serial.println(" steps)");
+      
+      lastMagnetPosition = currentPos;
+      magnetCount++;
+      
+      // Wait to clear magnet
+      while (digitalRead(MAG1_PIN) == LOW || digitalRead(MAG2_PIN) == LOW)
+      {
+        stepper.run();
+      }
+      
+      // Break if we've found all 12
+      if (magnetCount >= 12) break;
+    }
+    
+    lastMag1State = mag1Detected;
+    lastMag2State = mag2Detected;
+  }
+  
+  // Stop motor
+  long finalPos = stepper.currentPosition();
+  adjustmentSteps = pulsePerRev * 0.05;
+  stepper.moveTo(finalPos - adjustmentSteps);
+  while (stepper.run()) {}
+  
+  // Restore original RPM
+  targetRPM = savedRPM;
+  calculateOptimalSpeed();
+  
+  if (magnetCount == 12)
+  {
+    isCalibrated = true;
+    currentPosition = 1; // We're at MAG1 (p1)
+    magnetState = ON_MAGNET;
+    currentStepPosition = stepper.currentPosition(); // Sync logical position with actual position
+
+    Serial.println("\n=== CALIBRATION COMPLETE ===");
+    Serial.println("Recorded intervals (steps between magnets):");
+    for (int i = 0; i < 12; i++)
+    {
+      Serial.print("  p");
+      Serial.print(i + 1);
+      Serial.print(" -> p");
+      Serial.print((i + 1) % 12 + 1);
+      Serial.print(": ");
+      Serial.print(magnetIntervals[i]);
+      Serial.println(" steps");
+    }
+    Serial.println("\nSystem calibrated! You can now use p1-p12 commands.");
+    Serial.println("Currently at Home Position (Box 1)");
+  }
+  else
+  {
+    Serial.println("\n=== CALIBRATION FAILED ===");
+    Serial.print("ERROR: Only found ");
+    Serial.print(magnetCount);
+    Serial.println(" magnets (expected 12)");
+    Serial.println("Please check magnet installation and try again.");
+    isCalibrated = false;
+    currentPosition = 0;
   }
 }
 
-void handleNextCommand()
+void handlePositionCommand(int targetPos)
 {
-  if (magnetState == ON_MAGNET)
+  if (!isCalibrated)
   {
-    // Currently on a magnet, need to get off it first
-    magnetState = LEAVING_MAGNET;
-    if (!stepper.isRunning())
+    Serial.println("ERROR: System not calibrated! Run 'cal' command first.");
+    return;
+  }
+  
+  if (currentPosition == 0)
+  {
+    Serial.println("ERROR: Current position unknown! Run 'cal' command.");
+    return;
+  }
+  
+  if (targetPos == currentPosition)
+  {
+    Serial.print("Already at position p");
+    Serial.println(targetPos);
+    return;
+  }
+  
+  // Calculate shortest path
+  int stepsForward = (targetPos - currentPosition + 12) % 12;
+  int stepsBackward = (currentPosition - targetPos + 12) % 12;
+  
+  if (stepsForward == 0) stepsForward = 12;
+  if (stepsBackward == 0) stepsBackward = 12;
+  
+  bool goForward = (stepsForward <= stepsBackward);
+  int positionsToMove = goForward ? stepsForward : stepsBackward;
+  
+  // Calculate total steps
+  long totalSteps = 0;
+  if (goForward)
+  {
+    for (int i = 0; i < positionsToMove; i++)
     {
-      isDoorCycleArmed = true; // This movement command permits the door cycle
-      startMotor();
-      Serial.print("Moving off current magnet to find next one at ");
-      Serial.print(targetRPM);
-      Serial.print(" RPM (");
-      Serial.print(targetStepsPerSecond, 1);
-      Serial.println(" steps/sec)");
-    }
-    else
-    {
-      Serial.println("Motor already running!");
+      int intervalIndex = (currentPosition - 1 + i) % 12;
+      totalSteps += magnetIntervals[intervalIndex];
     }
   }
-  else if (magnetState == LEAVING_MAGNET || magnetState == SEEKING_MAGNET)
+  else
   {
-    Serial.println("INFO: Already searching for the next magnet.");
+    for (int i = 0; i < positionsToMove; i++)
+    {
+      int intervalIndex = (currentPosition - 2 - i + 12) % 12;
+      totalSteps -= magnetIntervals[intervalIndex];
+    }
   }
-  else // magnetState == UNKNOWN
+  
+  // Execute movement
+  Serial.print("Moving from p");
+  Serial.print(currentPosition);
+  Serial.print(" to p");
+  Serial.print(targetPos);
+  Serial.print(" (");
+  Serial.print(goForward ? "forward" : "backward");
+  Serial.print(", ");
+  Serial.print(abs(totalSteps));
+  Serial.println(" steps)");
+  
+  // Set target position and start movement
+  isDoorCycleArmed = true;
+  waitingForCommand = false;
+  
+  long targetStepPosition = currentStepPosition + totalSteps;
+  stepper.moveTo(targetStepPosition);
+  
+  // Wait for movement to complete
+  while (stepper.run())
   {
-    // Don't know current state, treat like init
-    Serial.println("Magnet state unknown. Use 'init' command first to establish position.");
+    // Optional: add progress reporting here
+  }
+  
+  // Update position tracking
+  currentStepPosition = targetStepPosition;
+  currentPosition = targetPos;
+  
+  // Verify magnet detection
+  bool mag1 = (digitalRead(MAG1_PIN) == LOW);
+  bool mag2 = (digitalRead(MAG2_PIN) == LOW);
+  
+  if (mag1 || mag2)
+  {
+    magnetState = ON_MAGNET;
+    Serial.print("Arrived at Box ");
+    Serial.print(targetPos);
+    Serial.println(" - Sensor detected ✓");
+    
+    waitingForCommand = true;
+    
+    // Trigger door cycle
+    if (isDoorCycleArmed)
+    {
+      Serial.println("Starting automatic door cycle...");
+      automaticDoorCycle();
+      isDoorCycleArmed = false;
+    }
+  }
+  else
+  {
+    magnetState = UNKNOWN;
+    Serial.println("ERROR: No magnet detected at target position!");
+    Serial.println("Position may have drifted. Please run 'cal' to recalibrate.");
+    isCalibrated = false;
+    currentPosition = 0;
   }
 }
