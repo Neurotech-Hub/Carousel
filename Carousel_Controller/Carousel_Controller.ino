@@ -10,7 +10,7 @@
 #define SERVO2_PIN 12
 
 // Version
-const String VERSION = "v1.10";
+const String VERSION = "v1.2";
 
 // Motor control parameters
 float targetStepsPerSecond = 0;  // Target speed in steps/second
@@ -21,7 +21,7 @@ float rmsCurrent = 3.2;       // RMS current setting (A)
 int pulsePerRev = 800;        // Pulses per revolution from driver setting
 bool halfCurrentMode = false; // Half current when stopped
 int targetRPM = 10;           // Target RPM speed
-int calibrationRPM = 8;       // Calibration RPM speed
+int homingRPM = 8;            // Homing RPM speed
 bool motorConfigured = true;  // Auto-configured with defaults
 
 // Calibration data
@@ -29,7 +29,6 @@ int magnetIntervals[12];          // Step intervals: [0]=p1→p2, [1]=p2→p3, .
 int currentPosition = 0;          // 0=uncalibrated, 1-12=calibrated position
 bool isCalibrated = false;        // Calibration status flag
 long currentStepPosition = 0;     // Track absolute stepper position for navigation
-int adjustmentSteps = 0;          // Adjustment Steps to feel discrepancy according to calibration speed
 
 // System state variables
 bool waitingForCommand = true;
@@ -84,7 +83,7 @@ void setup()
   Serial.println("Commands:");
   Serial.println("  'setup,[RMS_current],[full_current],[pulse/rev],[RPM]' - Configure motor (optional)");
   Serial.println("    Example: setup,3.2,off,800,10");
-  Serial.println("  'cal' - Calibrate system (find MAG1, record all 12 positions)");
+  Serial.println("  'home' - Find home position (MAG1) and initialize system");
   Serial.println("  'p1' to 'p12' - Move to specific position (shortest path)");
   Serial.println("  'open' - Open door (only when on magnet)");
   Serial.println("  'close' - Close door (only when on magnet)");
@@ -104,8 +103,8 @@ void setup()
   Serial.print("Target RPM: ");
   Serial.println(targetRPM);
   Serial.println();
-  Serial.println("⚠️  IMPORTANT: Run 'cal' command first to calibrate the system!");
-  Serial.println("Status: NOT CALIBRATED");
+  Serial.println("⚠️  IMPORTANT: Run 'home' command first to initialize the system!");
+  Serial.println("Status: NOT HOMED");
 
   // Calculate default speed settings
   updateMotorSpeed();
@@ -169,14 +168,14 @@ void processCommand(String command)
   {
     parseSetupCommand(command);
   }
-  else if (command == "cal")
+  else if (command == "home")
   {
     if (!motorConfigured)
     {
       Serial.println("ERROR: Motor not configured! Use 'setup' command first.");
       return;
     }
-    handleCalibrationCommand();
+    handleHomingCommand();
   }
   else if (command.startsWith("p") && command.length() >= 2)
   {
@@ -258,7 +257,7 @@ void processCommand(String command)
   }
   else
   {
-    Serial.println("Commands: cal | p1-p12 | open | close | stop/s | rpm [value] | mag | status | setup,[RMS_current],[full_current],[pulse/rev],[RPM]");
+    Serial.println("Commands: home | p1-p12 | open | close | stop/s | rpm [value] | mag | status | setup,[RMS_current],[full_current],[pulse/rev],[RPM]");
   }
 }
 
@@ -489,17 +488,17 @@ void printStatus()
   }
   
   Serial.println();
-  Serial.print("Calibration Status: ");
+  Serial.print("Homing Status: ");
   if (isCalibrated)
   {
-    Serial.println("CALIBRATED ✓");
+    Serial.println("HOMED ✓");
     Serial.print("Current Position: p");
     Serial.println(currentPosition);
   }
   else
   {
-    Serial.println("NOT CALIBRATED ⚠️");
-    Serial.println("Run 'cal' command to calibrate the system.");
+    Serial.println("NOT HOMED ⚠️");
+    Serial.println("Run 'home' command to initialize the system.");
   }
 
   Serial.print("Motor State: ");
@@ -560,19 +559,19 @@ void printStatus()
   Serial.println("=====================\n");
 }
 
-void handleCalibrationCommand()
+void handleHomingCommand()
 {
-  Serial.println("\n=== CALIBRATION START ===");
+  Serial.println("\n=== HOMING START ===");
   Serial.println("Finding Home Position...");
   
-  // Reset calibration data
+  // Reset homing data
   isCalibrated = false;
   currentPosition = 0;
   magnetState = UNKNOWN;
   
-  // Set calibration speed (8 RPM)
+  // Set homing speed (8 RPM)
   int savedRPM = targetRPM;
-  targetRPM = calibrationRPM;
+  targetRPM = homingRPM;
   calculateOptimalSpeed();
   stepper.setMaxSpeed(targetStepsPerSecond);
   
@@ -583,7 +582,6 @@ void handleCalibrationCommand()
   if (digitalRead(MAG1_PIN) == LOW)
   {
     Serial.println("Already at home position.");
-    Serial.println("Starting full rotation to record intervals...");
   }
   else
   {
@@ -603,121 +601,44 @@ void handleCalibrationCommand()
     while (stepper.run()) {} // Wait for stop
     
     Serial.println("Home position found.");
-    Serial.println("Starting full rotation to record intervals...");
   }
   
   // Reset position counter at MAG1
   stepper.setCurrentPosition(0);
   currentStepPosition = 0;
-  long lastMagnetPosition = 0;
-  int magnetCount = 0;
   
-  // Move off MAG1
-  stepper.move(100000);
-  stepper.setSpeed(targetStepsPerSecond);
-  while (digitalRead(MAG1_PIN) == LOW || digitalRead(MAG2_PIN) == LOW)
+  // Fill magnetIntervals array with hardcoded value of 840 steps
+  for (int i = 0; i < 12; i++)
   {
-    stepper.run();
+    magnetIntervals[i] = 840;
   }
-  
-  Serial.println("Cleared home position, now recording positions...");
-  
-  // Record intervals for full rotation
-  bool lastMag1State = false;
-  bool lastMag2State = false;
-  
-  while (magnetCount < 12)
-  {
-    stepper.run();
-    bool mag1Detected = (digitalRead(MAG1_PIN) == LOW);
-    bool mag2Detected = (digitalRead(MAG2_PIN) == LOW);
-    
-    // Detect rising edge (entering magnet)
-    if ((mag1Detected || mag2Detected) && (!lastMag1State && !lastMag2State))
-    {
-      long currentPos = stepper.currentPosition();
-      magnetIntervals[magnetCount] = currentPos - lastMagnetPosition;
-      
-      Serial.print("Box ");
-      Serial.print(magnetCount + 1);
-      Serial.print(" detected at position ");
-      Serial.print(currentPos);
-      Serial.print(" (interval: ");
-      Serial.print(magnetIntervals[magnetCount]);
-      Serial.println(" steps)");
-      
-      lastMagnetPosition = currentPos;
-      magnetCount++;
-      
-      // Wait to clear magnet
-      while (digitalRead(MAG1_PIN) == LOW || digitalRead(MAG2_PIN) == LOW)
-      {
-        stepper.run();
-      }
-      
-      // Break if we've found all 12
-      if (magnetCount >= 12) break;
-    }
-    
-    lastMag1State = mag1Detected;
-    lastMag2State = mag2Detected;
-  }
-  
-  // Stop motor
-  long finalPos = stepper.currentPosition();
-  adjustmentSteps = pulsePerRev * 0.05;
-  stepper.moveTo(finalPos - adjustmentSteps);
-  while (stepper.run()) {}
   
   // Restore original RPM
   targetRPM = savedRPM;
   calculateOptimalSpeed();
   
-  if (magnetCount == 12)
-  {
-    isCalibrated = true;
-    currentPosition = 1; // We're at MAG1 (p1)
-    magnetState = ON_MAGNET;
-    currentStepPosition = stepper.currentPosition(); // Sync logical position with actual position
+  // Set homing complete
+  isCalibrated = true;
+  currentPosition = 1; // We're at MAG1 (p1)
+  magnetState = ON_MAGNET;
 
-    Serial.println("\n=== CALIBRATION COMPLETE ===");
-    Serial.println("Recorded intervals (steps between magnets):");
-    for (int i = 0; i < 12; i++)
-    {
-      Serial.print("  p");
-      Serial.print(i + 1);
-      Serial.print(" -> p");
-      Serial.print((i + 1) % 12 + 1);
-      Serial.print(": ");
-      Serial.print(magnetIntervals[i]);
-      Serial.println(" steps");
-    }
-    Serial.println("\nSystem calibrated! You can now use p1-p12 commands.");
-    Serial.println("Currently at Home Position (Box 1)");
-  }
-  else
-  {
-    Serial.println("\n=== CALIBRATION FAILED ===");
-    Serial.print("ERROR: Only found ");
-    Serial.print(magnetCount);
-    Serial.println(" magnets (expected 12)");
-    Serial.println("Please check magnet installation and try again.");
-    isCalibrated = false;
-    currentPosition = 0;
-  }
+  Serial.println("\n=== HOMING COMPLETE ===");
+  Serial.println("System initialized with 842 steps between positions.");
+  Serial.println("You can now use p1-p12 commands.");
+  Serial.println("Currently at Home Position (Box 1)");
 }
 
 void handlePositionCommand(int targetPos)
 {
   if (!isCalibrated)
   {
-    Serial.println("ERROR: System not calibrated! Run 'cal' command first.");
+    Serial.println("ERROR: System not homed! Run 'home' command first.");
     return;
   }
   
   if (currentPosition == 0)
   {
-    Serial.println("ERROR: Current position unknown! Run 'cal' command.");
+    Serial.println("ERROR: Current position unknown! Run 'home' command.");
     return;
   }
   
@@ -810,7 +731,7 @@ void handlePositionCommand(int targetPos)
   {
     magnetState = UNKNOWN;
     Serial.println("ERROR: No magnet detected at target position!");
-    Serial.println("Position may have drifted. Please run 'cal' to recalibrate.");
+    Serial.println("Position may have drifted. Please run 'home' to re-home the system.");
     isCalibrated = false;
     currentPosition = 0;
   }
