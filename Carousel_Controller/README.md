@@ -1,6 +1,6 @@
 # Carousel Controller
 
-This project controls a stepper motor using an Arduino, a DM542T stepper driver, and Hall effect sensors for positioning. It allows for precise control over the motor's speed, acceleration, and position via serial commands. The system includes automatic door control and comes pre-configured with default settings for immediate use. It is designed for applications like a product carousel or any system requiring indexed rotational movement.
+This project controls a 12-position carousel using an Arduino, a DM542T stepper driver, and Hall effect sensors for positioning. It allows for precise control over the motor's speed, acceleration, and position via serial commands. The system includes automatic door control and comes pre-configured with default settings for immediate use. After homing to position 1 (MAG1), the carousel uses 840-step intervals between the 12 positions for consistent and reliable movement.
 
 ## Hardware Requirements
 
@@ -14,14 +14,16 @@ This project controls a stepper motor using an Arduino, a DM542T stepper driver,
 
 ## Default Configuration
 
-**Important**: Make sure that DM542T driver is enable to operate with 5V. It has two mode to operate 5V and 24V, Switch must be enabled for 5V.
+**Important**: Make sure that DM542T driver is enabled to operate with 5V. It has two modes to operate 5V and 24V. Switch must be enabled for 5V.
 
 * **RMS Current:** 3.2A
 * **Half Current Mode:** OFF
 * **Pulses per Revolution:** 800
 * **Target RPM:** 10
+* **Homing RPM:** 8
+* **Steps Between Positions:** 840 steps (hardcoded for 12 positions)
 
-Send the `init` command to begin operation.
+Send the `home` command to initialize the system and find the home position.
 
 ## DM542T Driver Switch Settings
 
@@ -101,17 +103,18 @@ Connect the control signal pins from the Arduino to the driver.
 
 The system is ready to use immediately with default settings. Here are the available commands:
 
-### `init`
-Initializes the carousel and finds the home position (MAG1). The motor will start moving and automatically stop when MAG1 is detected. An automatic door cycle will then be performed.
+### `home`
+Finds the home position (MAG1) and initializes the system with hardcoded 840-step intervals between all 12 positions. The motor will rotate until MAG1 is detected, then stop and set position 1 as home. This must be run before using position commands.
 
-*   **Example:** `init`
+*   **Example:** `home`
 
 ---
 
-### `next`
-After the motor has stopped at a magnet position, this command starts the motor again to find the *next* magnet position. The motor will automatically stop when MAG1 or MAG2 is detected and perform a door cycle.
+### `p1` to `p12`
+Moves to a specific position (1-12) using the shortest path. Position 1 (p1) is the home position at MAG1, and all other positions (p2-p12) are spaced 840 steps apart. Upon arrival, the system verifies magnet detection (MAG2) and performs an automatic door cycle.
 
-*   **Example:** `next`
+*   **Format:** `p[number]` (where number is 1-12)
+*   **Examples:** `p1`, `p5`, `p12`
 
 ---
 
@@ -129,10 +132,10 @@ Manually closes the door (only when positioned on a magnet). Both servos will re
 
 ---
 
-### `stop`
-Gently stops the motor with smooth deceleration.
+### `stop` or `s`
+Emergency stop - gently stops the motor with smooth deceleration.
 
-*   **Example:** `stop`
+*   **Examples:** `stop` or `s`
 
 ---
 
@@ -165,6 +168,30 @@ Tests both Hall effect sensors (MAG1 and MAG2). It will print the sensor status 
 ---
 
 ### `status`
-Prints a detailed report of the current system status, including motor configuration, current speed, position, direction, and sensor states.
+Prints a detailed report of the current system status, including motor configuration, homing status, current position, speed, direction, and sensor states.
 
 *   **Example:** `status`
+
+---
+
+## How It Works
+
+1. **Power on** the system - Arduino initializes with default settings
+2. **Run `home`** - System finds MAG1 (home position) and sets up 840-step intervals for all 12 positions
+3. **Use `p1`-`p12`** - Navigate to any position using the shortest path (forward or backward)
+4. **Automatic door cycle** - Door opens and closes automatically when reaching a position
+5. **Manual control** - Use `open`/`close` for manual door operation when stopped at a position
+
+## Position Layout
+
+The carousel has 12 equally-spaced positions:
+- **Position 1 (p1):** Home position at MAG1 sensor
+- **Positions 2-12 (p2-p12):** Each spaced exactly 840 steps from the previous position
+- **Shortest path logic:** System automatically chooses forward or backward movement based on which direction requires fewer steps
+
+## Troubleshooting
+
+- **"System not homed" error:** Run the `home` command first
+- **"No magnet detected at target position" error:** Position may have drifted due to missed steps. Run `home` again to re-initialize
+- **Motor not moving:** Check that ENABLE_PIN is LOW and driver is powered
+- **Inaccurate positioning:** Verify driver DIP switch settings match 800 pulses/revolution
