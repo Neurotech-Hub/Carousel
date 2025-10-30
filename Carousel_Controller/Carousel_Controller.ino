@@ -8,9 +8,11 @@
 #define MAG2_PIN 10
 #define SERVO1_PIN 11
 #define SERVO2_PIN 12
+#define BEAM_S1_PIN A0  // Mainchamber side (inside)
+#define BEAM_S2_PIN A1  // Subchamber side (outside)
 
 // Version
-const String VERSION = "v1.2";
+const String VERSION = "1.3.0";
 
 // Motor control parameters
 float targetStepsPerSecond = 0;  // Target speed in steps/second
@@ -33,6 +35,21 @@ long currentStepPosition = 0;     // Track absolute stepper position for navigat
 // System state variables
 bool waitingForCommand = true;
 bool isDoorCycleArmed = false;     // "Arms" the door cycle for the next magnet-induced stop
+
+// Beam breaker constants and state
+const int BEAM_THRESHOLD = 300;
+const int BEAM_DEBOUNCE_READS = 3;
+const int BEAM_DEBOUNCE_INTERVAL = 30;
+
+enum BeamMonitorState
+{
+  BEAM_IDLE,
+  BEAM_ENTRY_STARTED,
+  BEAM_MOUSE_IN_SUBCHAMBER,
+  BEAM_EXIT_STARTED
+};
+BeamMonitorState beamState = BEAM_IDLE;
+bool beamMonitoringActive = false;
 
 // Serial command buffer for non-blocking reading
 String commandBuffer = "";
@@ -63,6 +80,10 @@ void setup()
   // Configure sensor pin
   pinMode(MAG2_PIN, INPUT_PULLUP);
   pinMode(MAG1_PIN, INPUT_PULLUP);
+  
+  // Configure beam breaker pins
+  pinMode(BEAM_S1_PIN, INPUT_PULLUP);
+  pinMode(BEAM_S2_PIN, INPUT_PULLUP);
 
   // Attach servos and set initial position
   servo1.attach(SERVO1_PIN);
@@ -89,7 +110,8 @@ void setup()
   Serial.println("  'close' - Close door (only when on magnet)");
   Serial.println("  'stop' or 's' - Emergency stop");
   Serial.println("  'rpm [value]' - Set target RPM (1-30)");
-  Serial.println("  'mag' - Test sensor reading");
+  Serial.println("  'mag' - Test magnetic sensor reading");
+  Serial.println("  'beam' - Test beam breaker sensors");
   Serial.println("  'status' - Show system status");
   Serial.println();
   Serial.println("=== DEFAULT CONFIGURATION ===");
@@ -122,6 +144,12 @@ void loop()
   if (motorConfigured)
   {
     stepper.run();
+  }
+  
+  // Handle beam break monitoring if active
+  if (beamMonitoringActive)
+  {
+    handleBeamMonitoring();
   }
 }
 
@@ -180,6 +208,12 @@ void processCommand(String command)
   else if (command.startsWith("p") && command.length() >= 2)
   {
     // Handle position commands p1-p12
+    if (beamMonitoringActive)
+    {
+      Serial.println("ERROR: Cannot move while beam monitoring is active. Close the door first.");
+      return;
+    }
+    
     int position = command.substring(1).toInt();
     if (position >= 1 && position <= 12)
     {
@@ -251,13 +285,17 @@ void processCommand(String command)
   {
     testSensor();
   }
+  else if (command == "beam")
+  {
+    testBeamSensors();
+  }
   else if (command == "status")
   {
     printStatus();
   }
   else
   {
-    Serial.println("Commands: home | p1-p12 | open | close | stop/s | rpm [value] | mag | status | setup,[RMS_current],[full_current],[pulse/rev],[RPM]");
+    Serial.println("Commands: home | p1-p12 | open | close | stop/s | rpm [value] | mag | beam | status | setup,[RMS_current],[full_current],[pulse/rev],[RPM]");
   }
 }
 
@@ -425,6 +463,7 @@ void openDoor()
 
 void closeDoor()
 {
+  stopBeamMonitoring(); // Stop monitoring if active
   Serial.println("Closing door...");
   moveServoSlow(servo1, 90);  // servo1 to 90 degrees
   moveServoSlow(servo2, 90);  // servo2 to 90 degrees
@@ -433,8 +472,7 @@ void closeDoor()
 void automaticDoorCycle()
 {
   openDoor();
-  delay(1000); // Keep door open for 1 second
-  closeDoor();
+  startBeamMonitoring();
 }
 
 void testSensor()
@@ -460,6 +498,120 @@ void testSensor()
       Serial.println("No sensor detected");
     }
     delay(300);
+  }
+  Serial.println("Test complete.");
+}
+
+// Beam breaker sensor functions
+bool isBeamBroken(int pin)
+{
+  // Debounce: require 3 consecutive reads above threshold
+  int confirmedReads = 0;
+  
+  for (int i = 0; i < BEAM_DEBOUNCE_READS; i++)
+  {
+    int value = analogRead(pin);
+    if (value > BEAM_THRESHOLD)
+    {
+      confirmedReads++;
+    }
+    else
+    {
+      return false; // If any read is below threshold, beam is not broken
+    }
+    
+    if (i < BEAM_DEBOUNCE_READS - 1) // Don't delay after last read
+    {
+      delay(BEAM_DEBOUNCE_INTERVAL);
+    }
+  }
+  
+  return (confirmedReads == BEAM_DEBOUNCE_READS);
+}
+
+void handleBeamMonitoring()
+{
+  // Non-blocking state machine for beam break sequence detection
+  bool s1Broken = isBeamBroken(BEAM_S1_PIN);
+  bool s2Broken = isBeamBroken(BEAM_S2_PIN);
+  
+  switch (beamState)
+  {
+    case BEAM_IDLE:
+      // Waiting for mouse to start entering (S1 should break first)
+      if (s1Broken)
+      {
+        beamState = BEAM_ENTRY_STARTED;
+        // Silent - don't print intermediate state
+      }
+      break;
+      
+    case BEAM_ENTRY_STARTED:
+      // S1 was broken, now waiting for S2 to break (mouse fully entering)
+      if (s2Broken)
+      {
+        beamState = BEAM_MOUSE_IN_SUBCHAMBER;
+        Serial.println("Mouse in subchamber");
+      }
+      // If S1 clears without S2 breaking, ignore (mouse backed out)
+      break;
+      
+    case BEAM_MOUSE_IN_SUBCHAMBER:
+      // Mouse is in subchamber, waiting for exit sequence to start (S2 breaks first)
+      if (s2Broken)
+      {
+        beamState = BEAM_EXIT_STARTED;
+        // Silent - don't print intermediate state
+      }
+      break;
+      
+    case BEAM_EXIT_STARTED:
+      // S2 was broken (mouse exiting), waiting for S1 to break (mouse back in mainchamber)
+      if (s1Broken)
+      {
+        Serial.println("Mouse returned - closing door");
+        closeDoor(); // This will also stop beam monitoring
+      }
+      // If S2 clears without S1 breaking, ignore (mouse backed out)
+      break;
+  }
+}
+
+void startBeamMonitoring()
+{
+  beamState = BEAM_IDLE;
+  beamMonitoringActive = true;
+  Serial.println("Beam monitoring active - waiting for mouse movement");
+}
+
+void stopBeamMonitoring()
+{
+  beamMonitoringActive = false;
+  beamState = BEAM_IDLE;
+}
+
+void testBeamSensors()
+{
+  Serial.println("Testing beam breaker sensors for 10 seconds...");
+  Serial.println("Format: S1(mainchamber) | S2(subchamber)");
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < 10000)
+  {
+    int s1Value = analogRead(BEAM_S1_PIN);
+    int s2Value = analogRead(BEAM_S2_PIN);
+    bool s1Blocked = (s1Value > BEAM_THRESHOLD);
+    bool s2Blocked = (s2Value > BEAM_THRESHOLD);
+    
+    Serial.print("S1=");
+    Serial.print(s1Value);
+    Serial.print(" ");
+    Serial.print(s1Blocked ? "BLOCKED" : "CLEAR");
+    Serial.print("  |  S2=");
+    Serial.print(s2Value);
+    Serial.print(" ");
+    Serial.println(s2Blocked ? "BLOCKED" : "CLEAR");
+    delay(100);
   }
   Serial.println("Test complete.");
 }
@@ -555,6 +707,46 @@ void printStatus()
     Serial.println("SEEKING_MAGNET");
     break;
   }
+  
+  Serial.println();
+  Serial.print("Beam Monitoring: ");
+  Serial.println(beamMonitoringActive ? "ACTIVE" : "INACTIVE");
+  
+  if (beamMonitoringActive)
+  {
+    Serial.print("Beam State: ");
+    switch (beamState)
+    {
+    case BEAM_IDLE:
+      Serial.println("IDLE (waiting for S1)");
+      break;
+    case BEAM_ENTRY_STARTED:
+      Serial.println("ENTRY_STARTED (S1 detected, waiting for S2)");
+      break;
+    case BEAM_MOUSE_IN_SUBCHAMBER:
+      Serial.println("MOUSE_IN_SUBCHAMBER (waiting for S2 exit)");
+      break;
+    case BEAM_EXIT_STARTED:
+      Serial.println("EXIT_STARTED (S2 detected, waiting for S1)");
+      break;
+    }
+  }
+  
+  // Show current beam sensor readings
+  int s1Value = analogRead(BEAM_S1_PIN);
+  int s2Value = analogRead(BEAM_S2_PIN);
+  bool s1Blocked = (s1Value > BEAM_THRESHOLD);
+  bool s2Blocked = (s2Value > BEAM_THRESHOLD);
+  
+  Serial.print("Beam S1 (mainchamber): ");
+  Serial.print(s1Value);
+  Serial.print(" - ");
+  Serial.println(s1Blocked ? "BLOCKED" : "CLEAR");
+  
+  Serial.print("Beam S2 (subchamber): ");
+  Serial.print(s2Value);
+  Serial.print(" - ");
+  Serial.println(s2Blocked ? "BLOCKED" : "CLEAR");
 
   Serial.println("=====================\n");
 }
@@ -722,7 +914,7 @@ void handlePositionCommand(int targetPos)
     // Trigger door cycle
     if (isDoorCycleArmed)
     {
-      Serial.println("Starting automatic door cycle...");
+      Serial.println("Starting door cycle...");
       automaticDoorCycle();
       isDoorCycleArmed = false;
     }

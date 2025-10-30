@@ -9,6 +9,7 @@ This project controls a 12-position carousel using an Arduino, a DM542T stepper 
 *   **Stepper Motor:** NEMA 23 Stepper Motor (23HS45-4204S or similar bipolar stepper)
 *   **Power Supply:** 24V DC Power Supply
 *   **Sensors:** 2x Hall Effect Sensors (MAG1 and MAG2 for detecting magnet positions)
+*   **Beam Breakers:** 2x IR LED + Phototransistor pairs (S1 mainchamber side, S2 subchamber side)
 *   **Servos:** 2x Servo Motors (for door control)
 *   **Jumper Wires**
 
@@ -88,7 +89,18 @@ Connect the control signal pins from the Arduino to the driver.
 | **MAG2 GND** | GND | Ground |
 | **MAG2 Signal** | **Digital Pin 10** | Position Detection |
 
-### 5. Servo Motors to Arduino
+### 5. Beam Breaker Sensors to Arduino
+
+| Beam Sensor | Arduino Pin | Function |
+| :--- | :--- | :--- |
+| **S1 Phototransistor** | **A0** | Mainchamber side beam receiver |
+| **S2 Phototransistor** | **A1** | Subchamber side beam receiver |
+
+Notes:
+- Drive the IR LEDs with appropriate resistors and 5V.
+- Phototransistor outputs are read as analog values on A0/A1; wiring should pull readings lower when beam is received and higher when blocked, matching the example `THRESHOLD=300`.
+
+### 6. Servo Motors to Arduino
 
 | Servo | Arduino Pin | Function |
 | :--- | :--- | :--- |
@@ -111,7 +123,7 @@ Finds the home position (MAG1) and initializes the system with hardcoded 840-ste
 ---
 
 ### `p1` to `p12`
-Moves to a specific position (1-12) using the shortest path. Position 1 (p1) is the home position at MAG1, and all other positions (p2-p12) are spaced 840 steps apart. Upon arrival, the system verifies magnet detection (MAG2) and performs an automatic door cycle.
+Moves to a specific position (1-12) using the shortest path. Position 1 (p1) is the home position at MAG1, and all other positions (p2-p12) are spaced 840 steps apart. Upon arrival, the system verifies magnet detection (MAG2) and opens the door, then uses the beam breaker sensors to control when to close the door (see Beam Breaker Door Control below).
 
 *   **Format:** `p[number]` (where number is 1-12)
 *   **Examples:** `p1`, `p5`, `p12`
@@ -126,7 +138,7 @@ Manually opens the door (only when positioned on a magnet). Both servos will mov
 ---
 
 ### `close`
-Manually closes the door (only when positioned on a magnet). Both servos will return to the closed position.
+Manually closes the door (only when positioned on a magnet). Both servos will return to the closed position. If beam monitoring is active, it is stopped immediately.
 
 *   **Example:** `close`
 
@@ -167,6 +179,13 @@ Tests both Hall effect sensors (MAG1 and MAG2). It will print the sensor status 
 
 ---
 
+### `beam`
+Tests the beam breaker sensors (S1 on A0, S2 on A1) for 10 seconds, printing raw values and CLEAR/BLOCKED status.
+
+*   **Example:** `beam`
+
+---
+
 ### `status`
 Prints a detailed report of the current system status, including motor configuration, homing status, current position, speed, direction, and sensor states.
 
@@ -179,7 +198,7 @@ Prints a detailed report of the current system status, including motor configura
 1. **Power on** the system - Arduino initializes with default settings
 2. **Run `home`** - System finds MAG1 (home position) and sets up 840-step intervals for all 12 positions
 3. **Use `p1`-`p12`** - Navigate to any position using the shortest path (forward or backward)
-4. **Automatic door cycle** - Door opens and closes automatically when reaching a position
+4. **Automatic door control** - Door opens upon reaching a position. Closing is controlled by the beam breaker sequence (see below).
 5. **Manual control** - Use `open`/`close` for manual door operation when stopped at a position
 
 ## Position Layout
@@ -195,3 +214,30 @@ The carousel has 12 equally-spaced positions:
 - **"No magnet detected at target position" error:** Position may have drifted due to missed steps. Run `home` again to re-initialize
 - **Motor not moving:** Check that ENABLE_PIN is LOW and driver is powered
 - **Inaccurate positioning:** Verify driver DIP switch settings match 800 pulses/revolution
+
+---
+
+## Beam Breaker Door Control
+
+The system uses two IR beam breakers to determine mouse direction through the doorway and control when to close the door.
+
+- **S1 (A0)**: Mainchamber side (inside)
+- **S2 (A1)**: Subchamber side (outside)
+- **Threshold:** 300 (analog units)
+- **Debounce:** 3 consecutive reads, 30 ms apart
+
+### Behavior
+- When the carousel arrives at a position and confirms the magnet, the door opens and beam monitoring starts.
+- The door remains open indefinitely until the correct exit sequence is observed.
+
+### Sequences
+- **Entry:** S1 break → S2 break → Mouse is in subchamber (door stays open)
+- **Exit:** S2 break → S1 break → Mouse returned to mainchamber → Door closes immediately
+
+### Notes
+- While beam monitoring is active, movement commands (`p1`-`p12`) are rejected; close the door first.
+- Manual `close` overrides beam monitoring and closes the door immediately.
+- `status` shows current beam monitoring state and live sensor readings.
+
+### Sensor Testing
+Use `beam` to print 10s of diagnostics for S1 and S2 (raw values and BLOCKED/CLEAR), helpful for aligning sensors and validating the threshold.
