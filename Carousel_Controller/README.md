@@ -104,10 +104,10 @@ Notes:
 
 | Servo | Arduino Pin | Function |
 | :--- | :--- | :--- |
-| **Servo1 Signal** | **Digital Pin 11** | Door Control |
+| **Right Door** | **Digital Pin 11** | Door Control |
 | **Servo1 VCC** | 5V | Power |
 | **Servo1 GND** | GND | Ground |
-| **Servo2 Signal** | **Digital Pin 12** | Door Control |
+| **Left Door** | **Digital Pin 12** | Door Control |
 | **Servo2 VCC** | 5V | Power |
 | **Servo2 GND** | GND | Ground |
 
@@ -223,8 +223,8 @@ The system uses two IR beam breakers to determine mouse direction through the do
 
 - **S1 (A0)**: Mainchamber side (inside)
 - **S2 (A1)**: Subchamber side (outside)
-- **Threshold:** 300 (analog units)
-- **Debounce:** 3 consecutive reads, 30 ms apart
+- **Threshold:** 700 (analog units)
+- **Detection:** Single read
 
 ### Behavior
 - When the carousel arrives at a position and confirms the magnet, the door opens and beam monitoring starts.

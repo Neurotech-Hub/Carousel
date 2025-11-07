@@ -219,9 +219,7 @@ bool waitingForCommand = true;      // Command waiting flag
 bool isDoorCycleArmed = false;      // Door cycle trigger flag
 
 // Beam Breaker Constants
-const int BEAM_THRESHOLD = 300;                 // Analog threshold
-const int BEAM_DEBOUNCE_READS = 3;              // Confirmation reads
-const int BEAM_DEBOUNCE_INTERVAL = 30;          // ms between reads
+const int BEAM_THRESHOLD = 700;                 // Analog threshold
 
 // Serial Command Buffer
 String commandBuffer = "";
@@ -387,8 +385,8 @@ int positionsToMove = goForward ? stepsForward : stepsBackward;
 **Sensor configuration:**
 - S1 (A0): Mainchamber side (inside)
 - S2 (A1): Subchamber side (outside)
-- Threshold: 300 (analogRead)
-- Debounce: 3 consecutive reads with 30ms intervals
+- Threshold: 700 (analogRead)
+- Detection: Single read (no debouncing for fast mouse detection)
 
 **Detection sequence:**
 1. **Entry:** S1 breaks → S2 breaks → "Mouse in subchamber"
@@ -595,31 +593,17 @@ void handleCommands()
 
 **Key:** One character per call, no blocking delays for soft stop command.
 
-### 9.2 Debounced Sensor Reading
+### 9.2 Beam Sensor Reading
 
 ```cpp
 bool isBeamBroken(int pin)
 {
-  int confirmedReads = 0;
-  
-  for (int i = 0; i < BEAM_DEBOUNCE_READS; i++) {
-    int value = analogRead(pin);
-    if (value > BEAM_THRESHOLD) {
-      confirmedReads++;
-    } else {
-      return false;  // Any read below threshold = not broken
-    }
-    
-    if (i < BEAM_DEBOUNCE_READS - 1) {
-      delay(BEAM_DEBOUNCE_INTERVAL);
-    }
-  }
-  
-  return (confirmedReads == BEAM_DEBOUNCE_READS);
+  int value = analogRead(pin);
+  return (value > BEAM_THRESHOLD);
 }
 ```
 
-**Requirement:** `n` consecutive reads above `threshold` = beam broken.
+**Requirement:** Single read above threshold = beam broken. No debouncing for fast mouse detection.
 
 ### 9.3 Smooth Servo Movement
 
@@ -810,7 +794,7 @@ Status: NOT HOMED
 
 - **stepper.run():** Must be called frequently (every loop iteration)
 - **Servo delays:** 20ms per 10° increment (non-negotiable)
-- **Beam debounce:** 30ms intervals for 3 reads = ~90ms per check
+- **Beam detection:** Single analogRead per check (~100μs)
 - **Serial buffer:** Processes one character at a time
 
 ### 11.2 Memory Considerations
@@ -899,7 +883,7 @@ Status: NOT HOMED
 | Never homes | MAG1 not detected | Check wiring, test with `mag` command |
 | Misses positions | MAG2 not detected | Verify sensor placement |
 | False triggers | Noise in sensor | Check pullup resistors enabled |
-| Beam not detected | Threshold too high | Lower BEAM_THRESHOLD |
+| Beam not detected | Threshold too high/low | Adjust BEAM_THRESHOLD (currently 700) |
 
 ### 13.3 Door Issues
 

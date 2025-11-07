@@ -4,10 +4,10 @@
 #define STEP_PIN 7
 #define DIR_PIN 8
 #define ENABLE_PIN 4
-#define MAG1_PIN 9
-#define MAG2_PIN 10
-#define SERVO1_PIN 11
-#define SERVO2_PIN 12
+#define MAG1_PIN 9      // Top Magnet
+#define MAG2_PIN 10     // Bottom Magnet
+#define SERVO1_PIN 11   // Right Door
+#define SERVO2_PIN 12   // Left Door  
 #define BEAM_S1_PIN A0  // Mainchamber side (inside)
 #define BEAM_S2_PIN A1  // Subchamber side (outside)
 
@@ -37,9 +37,7 @@ bool waitingForCommand = true;
 bool isDoorCycleArmed = false;     // "Arms" the door cycle for the next magnet-induced stop
 
 // Beam breaker constants and state
-const int BEAM_THRESHOLD = 300;
-const int BEAM_DEBOUNCE_READS = 3;
-const int BEAM_DEBOUNCE_INTERVAL = 30;
+const int BEAM_THRESHOLD = 700;
 
 enum BeamMonitorState
 {
@@ -505,28 +503,9 @@ void testSensor()
 // Beam breaker sensor functions
 bool isBeamBroken(int pin)
 {
-  // Debounce: require 3 consecutive reads above threshold
-  int confirmedReads = 0;
-  
-  for (int i = 0; i < BEAM_DEBOUNCE_READS; i++)
-  {
-    int value = analogRead(pin);
-    if (value > BEAM_THRESHOLD)
-    {
-      confirmedReads++;
-    }
-    else
-    {
-      return false; // If any read is below threshold, beam is not broken
-    }
-    
-    if (i < BEAM_DEBOUNCE_READS - 1) // Don't delay after last read
-    {
-      delay(BEAM_DEBOUNCE_INTERVAL);
-    }
-  }
-  
-  return (confirmedReads == BEAM_DEBOUNCE_READS);
+  // Single read for mouse detection
+  int value = analogRead(pin);
+  return (value > BEAM_THRESHOLD);
 }
 
 void handleBeamMonitoring()
