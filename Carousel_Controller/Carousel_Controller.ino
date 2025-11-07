@@ -12,7 +12,7 @@
 #define BEAM_S2_PIN A1  // Subchamber side (outside)
 
 // Version
-const String VERSION = "1.3.0";
+const String VERSION = "1.4.0";
 
 // Motor control parameters
 float targetStepsPerSecond = 0;  // Target speed in steps/second
@@ -37,6 +37,16 @@ int homingAdjustmentStep = 8;     // Temp: Homing requires few steps adjustments
 bool waitingForCommand = true;
 bool isDoorCycleArmed = false;     // "Arms" the door cycle for the next magnet-induced stop
 
+// Dwell time tracking (v1.4.0)
+unsigned long doorOpenTime = 0;        // millis() when door opens
+unsigned long entryTime = 0;           // millis() when mouse enters subchamber
+unsigned long exitTime = 0;            // millis() when mouse exits subchamber
+unsigned long doorCloseTime = 0;       // millis() when door closes
+bool doorOpenTypeAuto = false;         // true=AUTO, false=MANUAL
+int sessionTrialNumber = 0;            // Trial counter (resets on home command)
+bool hasEntryOccurred = false;         // Flag: has mouse entered subchamber?
+bool hasExitOccurred = false;          // Flag: has mouse exited subchamber?
+
 // Beam breaker constants and state
 const int BEAM_THRESHOLD = 700;
 
@@ -58,9 +68,7 @@ const int MAX_COMMAND_LENGTH = 64;  // Maximum command length
 enum MagnetState
 {
   UNKNOWN,
-  ON_MAGNET,
-  LEAVING_MAGNET, // Moving off the current magnet
-  SEEKING_MAGNET  // Looking for the next magnet
+  ON_MAGNET
 };
 MagnetState magnetState = UNKNOWN;
 
@@ -227,7 +235,8 @@ void processCommand(String command)
   {
     if (magnetState == ON_MAGNET)
     {
-      openDoor();
+      openDoor(false);  // Manual door open
+      startBeamMonitoring();
     }
     else
     {
@@ -453,30 +462,44 @@ void moveServoSlow(Servo &servo, int targetPosition)
   }
 }
 
-void openDoor()
+void openDoor(bool isAutomatic)
 {
-  Serial.println("Opening door...");
+  doorOpenTime = millis();
+  doorOpenTypeAuto = isAutomatic;
+  hasEntryOccurred = false;  // Reset flags for new trial
+  hasExitOccurred = false;
+  
+  sendStatusUpdate("DOOR", "OPEN");
   moveServoSlow(servo1, 0);   // servo1 to 0 degrees
   moveServoSlow(servo2, 180);   // servo2 to 180 degrees
 }
 
 void closeDoor()
 {
+  doorCloseTime = millis();
+  
+  // Send data packet if we have valid entry
+  if (hasEntryOccurred)
+  {
+    sendDataPacket();
+  }
+  
   stopBeamMonitoring(); // Stop monitoring if active
-  Serial.println("Closing door...");
+  sendStatusUpdate("DOOR", "CLOSED");
   moveServoSlow(servo1, 90);  // servo1 to 90 degrees
   moveServoSlow(servo2, 90);  // servo2 to 90 degrees
+  sendStatusUpdate("MOUSE", "IDLE");
 }
 
 void automaticDoorCycle()
 {
-  openDoor();
+  openDoor(true);  // Automatic door open
   startBeamMonitoring();
 }
 
 void testSensor()
 {
-  Serial.println("Testing sensors for 10 seconds...");
+  Serial.println("Testing magnetic sensors for 10 seconds...");
   unsigned long startTime = millis();
 
   while (millis() - startTime < 10000)
@@ -522,16 +545,19 @@ void handleBeamMonitoring()
       if (s1Broken)
       {
         beamState = BEAM_ENTRY_STARTED;
-        // Silent - don't print intermediate state
+        sendStatusUpdate("MOUSE", "ENTRY");
       }
       break;
       
     case BEAM_ENTRY_STARTED:
       // S1 was broken, now waiting for S2 to break (mouse fully entering)
-      if (s2Broken)
+      if (s2Broken && !hasEntryOccurred)
       {
+        entryTime = millis();  // CAPTURE ENTRY TIME
+        hasEntryOccurred = true;
         beamState = BEAM_MOUSE_IN_SUBCHAMBER;
         Serial.println("Mouse in subchamber");
+        sendStatusUpdate("MOUSE", "ENTERED");
       }
       // If S1 clears without S2 breaking, ignore (mouse backed out)
       break;
@@ -541,14 +567,16 @@ void handleBeamMonitoring()
       if (s2Broken)
       {
         beamState = BEAM_EXIT_STARTED;
-        // Silent - don't print intermediate state
+        sendStatusUpdate("MOUSE", "EXIT");
       }
       break;
       
     case BEAM_EXIT_STARTED:
       // S2 was broken (mouse exiting), waiting for S1 to break (mouse back in mainchamber)
-      if (s1Broken)
+      if (s1Broken && !hasExitOccurred)
       {
+        exitTime = millis();  // CAPTURE EXIT TIME
+        hasExitOccurred = true;
         Serial.println("Mouse returned - closing door");
         closeDoor(); // This will also stop beam monitoring
       }
@@ -680,12 +708,6 @@ void printStatus()
   case ON_MAGNET:
     Serial.println("ON_MAGNET");
     break;
-  case LEAVING_MAGNET:
-    Serial.println("LEAVING_MAGNET");
-    break;
-  case SEEKING_MAGNET:
-    Serial.println("SEEKING_MAGNET");
-    break;
   }
   
   Serial.println();
@@ -729,6 +751,15 @@ void printStatus()
   Serial.println(s2Blocked ? "BLOCKED" : "CLEAR");
 
   Serial.println("=====================\n");
+  
+  // Send structured status for GUI parsing (v1.4.0)
+  Serial.println("--- STRUCTURED STATUS ---");
+  sendStatusUpdate("MAGNET", magnetStateToString(magnetState));
+  sendStatusUpdate("MOUSE", beamStateToString(beamState));
+  sendStatusUpdate("POSITION", String(currentPosition));
+  sendStatusUpdate("HOMED", isCalibrated ? "TRUE" : "FALSE");
+  sendStatusUpdate("TRIAL", String(sessionTrialNumber));
+  Serial.println("------------------------\n");
 }
 
 void handleHomingCommand()
@@ -789,6 +820,15 @@ void handleHomingCommand()
   targetRPM = savedRPM;
   calculateOptimalSpeed();
   
+  // Reset session data (v1.4.0)
+  sessionTrialNumber = 0;
+  doorOpenTime = 0;
+  entryTime = 0;
+  exitTime = 0;
+  doorCloseTime = 0;
+  hasEntryOccurred = false;
+  hasExitOccurred = false;
+  
   // Set homing complete
   isCalibrated = true;
   currentPosition = 1; // We're at MAG1 (p1)
@@ -798,6 +838,10 @@ void handleHomingCommand()
   Serial.println("System initialized with 842 steps between positions.");
   Serial.println("You can now use p1-p12 commands.");
   Serial.println("Currently at Home Position (Box 1)");
+  Serial.println("New session started - trial counter reset");
+  sendStatusUpdate("SESSION", "NEW");
+  sendStatusUpdate("MAGNET", "ON_MAGNET");
+  sendStatusUpdate("MOUSE", "IDLE");
 }
 
 void handlePositionCommand(int targetPos)
@@ -906,5 +950,69 @@ void handlePositionCommand(int targetPos)
     Serial.println("Position may have drifted. Please run 'home' to re-home the system.");
     isCalibrated = false;
     currentPosition = 0;
+  }
+}
+
+// ============================================
+// v1.4.0 Data Logging Functions
+// ============================================
+
+void sendDataPacket()
+{
+  // CSV Format: DATA,Trial,Position,EntryTime,ExitTime,DwellTime,Event
+  
+  sessionTrialNumber++;  // Increment trial counter
+  
+  // Calculate dwell time in seconds
+  float dwellSeconds = 0.0;
+  if (hasEntryOccurred && hasExitOccurred && exitTime >= entryTime)
+  {
+    dwellSeconds = (exitTime - entryTime) / 1000.0;
+  }
+  
+  // Send CSV packet
+  Serial.print("DATA,");
+  Serial.print(sessionTrialNumber);
+  Serial.print(",");
+  Serial.print(currentPosition);
+  Serial.print(",");
+  Serial.print(hasEntryOccurred ? entryTime : 0);
+  Serial.print(",");
+  Serial.print(hasExitOccurred ? exitTime : 0);
+  Serial.print(",");
+  Serial.print(dwellSeconds, 2);  // 2 decimal places
+  Serial.print(",");
+  Serial.println(doorOpenTypeAuto ? "AUTO" : "MANUAL");
+}
+
+void sendStatusUpdate(String field, String value)
+{
+  // Format: STATUS:FIELD:VALUE
+  Serial.print("STATUS:");
+  Serial.print(field);
+  Serial.print(":");
+  Serial.println(value);
+}
+
+// Helper functions for state-to-string conversion
+String magnetStateToString(MagnetState state)
+{
+  switch(state) {
+    case ON_MAGNET: return "ON_MAGNET";
+    case UNKNOWN: return "UNKNOWN";
+    default: return "UNKNOWN";
+  }
+}
+
+String beamStateToString(BeamMonitorState state)
+{
+  if (!beamMonitoringActive) return "IDLE";
+  
+  switch(state) {
+    case BEAM_IDLE: return "IDLE";
+    case BEAM_ENTRY_STARTED: return "ENTRY";
+    case BEAM_MOUSE_IN_SUBCHAMBER: return "ENTERED";
+    case BEAM_EXIT_STARTED: return "EXIT";
+    default: return "IDLE";
   }
 }

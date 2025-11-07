@@ -30,3 +30,21 @@
 *.exe
 *.out
 *.app
+
+# Data folder (v1.4.0 - Excel logs)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Mac
+.DS_Store
