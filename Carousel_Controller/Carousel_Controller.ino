@@ -12,7 +12,7 @@
 #define BEAM_S2_PIN A1  // Subchamber side (outside)
 
 // Version
-const String VERSION = "1.4.0";
+const String VERSION = "1.4.1";
 
 // Motor control parameters
 float targetStepsPerSecond = 0;  // Target speed in steps/second
@@ -567,7 +567,6 @@ void handleBeamMonitoring()
       if (s2Broken)
       {
         beamState = BEAM_EXIT_STARTED;
-        sendStatusUpdate("MOUSE", "EXIT");
       }
       break;
       
@@ -753,7 +752,7 @@ void printStatus()
   Serial.println("=====================\n");
   
   // Send structured status for GUI parsing (v1.4.0)
-  Serial.println("--- STRUCTURED STATUS ---");
+  Serial.println("--- System Status ---");
   sendStatusUpdate("MAGNET", magnetStateToString(magnetState));
   sendStatusUpdate("MOUSE", beamStateToString(beamState));
   sendStatusUpdate("POSITION", String(currentPosition));
@@ -842,6 +841,7 @@ void handleHomingCommand()
   sendStatusUpdate("SESSION", "NEW");
   sendStatusUpdate("MAGNET", "ON_MAGNET");
   sendStatusUpdate("MOUSE", "IDLE");
+  sendStatusUpdate("Position", "Home P1");
 }
 
 void handlePositionCommand(int targetPos)
@@ -932,7 +932,7 @@ void handlePositionCommand(int targetPos)
     Serial.print("Arrived at Box ");
     Serial.print(targetPos);
     Serial.println(" - Sensor detected ✓");
-    
+    sendStatusUpdate("Position", "P" + String(targetPos));
     waitingForCommand = true;
     
     // Trigger door cycle

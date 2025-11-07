@@ -1,9 +1,8 @@
 """
 Carousel Controller - Main GUI Application
-Version: 1.4.0
+Version: 1.4.1
 
 Complete GUI interface for controlling the carousel and logging dwell time data.
-Based on SOLAR_ControllerV3 reference design.
 """
 
 import tkinter as tk
@@ -33,7 +32,7 @@ class CarouselControlGUI:
         """Initialize the GUI application."""
         self.root = root
         self.root.title("Carousel Controller v1.4.0 - Dwell Time Logger")
-        self.root.geometry("900x700")
+        self.root.geometry("700x750")
         
         # Initialize backend components
         self.serial_handler = SerialHandler(self)
@@ -41,6 +40,7 @@ class CarouselControlGUI:
         
         # State tracking
         self.auto_detect_enabled = tk.BooleanVar(value=True)
+        self.auto_connect_attempted = False  # Track if we've tried auto-connect on startup
         
         # Build GUI sections
         self.create_section1_serial_connection()
@@ -103,6 +103,14 @@ class CarouselControlGUI:
             arduino_port = self.serial_handler.auto_detect_arduino()
             if arduino_port and arduino_port in ports:
                 self.port_combo.set(arduino_port)
+                
+                # Auto-connect on first detection (startup only)
+                if not self.auto_connect_attempted and not self.serial_handler.is_connected:
+                    self.auto_connect_attempted = True
+                    self.log_message(f"Auto-detected Arduino on {arduino_port}, connecting...", "INFO")
+                    # Schedule connection after a short delay to let GUI finish initializing
+                    self.root.after(100, lambda: self.auto_connect(arduino_port))
+                    
             elif ports:
                 self.port_combo.set(ports[0])
         elif not self.port_combo.get() and ports:
@@ -115,6 +123,21 @@ class CarouselControlGUI:
         """Handle auto-detect checkbox toggle."""
         if self.auto_detect_enabled.get():
             self.refresh_ports()
+    
+    def auto_connect(self, port):
+        """
+        Automatically connect to the specified port.
+        
+        Args:
+            port (str): Port name to connect to
+        """
+        if self.serial_handler.connect(port):
+            self.connect_btn.config(text="Disconnect")
+            self.conn_status_label.config(foreground="green")
+            self.conn_text_label.config(text="Connected")
+            self.log_message(f"✓ Successfully connected to {port}", "STATUS")
+        else:
+            self.log_message(f"✗ Failed to auto-connect to {port}", "ERROR")
     
     def toggle_connection(self):
         """Toggle serial connection on/off."""
@@ -150,21 +173,21 @@ class CarouselControlGUI:
         frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         
         # Magnet State
-        ttk.Label(frame, text="Magnet State:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Magnet State:", font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=5)
         self.magnet_label = ttk.Label(frame, text="Unknown", 
-                                      font=("Arial", 12, "bold"), foreground="gray")
+                                      font=("Arial", 10, "bold"), foreground="gray")
         self.magnet_label.grid(row=0, column=1, sticky="w", pady=5, padx=10)
         
         # Mouse Status (renamed from Beam State)
-        ttk.Label(frame, text="Mouse Status:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Mouse Status:", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
         self.mouse_label = ttk.Label(frame, text="IDLE", 
-                                     font=("Arial", 12, "bold"), foreground="light blue")
+                                     font=("Arial", 10, "bold"), foreground="blue")
         self.mouse_label.grid(row=1, column=1, sticky="w", pady=5, padx=10)
         
         # Current Position
-        ttk.Label(frame, text="Position:", font=("Arial", 12)).grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Position:", font=("Arial", 10)).grid(row=2, column=0, sticky="w", pady=5)
         self.position_label = ttk.Label(frame, text="Unknown", 
-                                       font=("Arial", 12, "bold"))
+                                       font=("Arial", 10, "bold"))
         self.position_label.grid(row=2, column=1, sticky="w", pady=5, padx=10)
         
         # Buttons
@@ -175,6 +198,15 @@ class CarouselControlGUI:
                    command=self.send_status_command).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Emergency Stop", 
                    command=self.send_stop_command).pack(side="left", padx=5)
+        
+        # Troubleshooting
+        trouble_frame = ttk.LabelFrame(frame, text="Troubleshooting", padding=5)
+        trouble_frame.grid(row=4, column=0, columnspan=2, pady=10, sticky="ew")
+        
+        ttk.Button(trouble_frame, text="Test Mag", command=self.send_mag,
+                   width=10).pack(side="left", padx=5)
+        ttk.Button(trouble_frame, text="Test Beam", command=self.send_beam,
+                   width=10).pack(side="left", padx=5)
     
     def send_status_command(self):
         """Send status command to Arduino."""
@@ -196,45 +228,46 @@ class CarouselControlGUI:
         
         # Home button
         ttk.Button(frame, text="Home", command=self.send_home, 
-                   width=15).grid(row=0, column=0, columnspan=2, pady=5)
+                   width=15).grid(row=0, column=0, columnspan=4, pady=5)
         
-        # Position control
-        ttk.Label(frame, text="Position:").grid(row=1, column=0, sticky="w", pady=5)
-        self.position_combo = ttk.Combobox(frame, 
-                                          values=[f"p{i}" for i in range(1, 13)],
-                                          width=8, state='readonly')
-        self.position_combo.grid(row=1, column=1, pady=5)
-        self.position_combo.set("p1")
-        ttk.Button(frame, text="Go", command=self.send_position,
-                   width=6).grid(row=1, column=2, pady=5, padx=5)
+        # Position control - 12 buttons in a 3x4 grid
+        ttk.Label(frame, text="Position:", font=("Arial", 10)).grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 5))
+        
+        position_frame = ttk.Frame(frame)
+        position_frame.grid(row=2, column=0, columnspan=4, pady=5)
+        
+        # Create 12 position buttons in a 3x4 grid
+        self.position_buttons = []
+        for i in range(1, 13):
+            btn = ttk.Button(position_frame, text=f"p{i}", 
+                           command=lambda pos=i: self.send_position(pos),
+                           width=4)
+            row = (i - 1) // 4  # 4 columns per row
+            col = (i - 1) % 4   # 4 columns
+            btn.grid(row=row, column=col, padx=2, pady=2)
+            self.position_buttons.append(btn)
         
         # Manual door control
         door_frame = ttk.LabelFrame(frame, text="Manual Door", padding=5)
-        door_frame.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew")
+        door_frame.grid(row=3, column=0, columnspan=4, pady=10, sticky="ew")
         
         ttk.Button(door_frame, text="Open", command=self.send_open,
                    width=10).pack(side="left", padx=5)
         ttk.Button(door_frame, text="Close", command=self.send_close,
-                   width=10).pack(side="left", padx=5)
-        
-        # Troubleshooting
-        trouble_frame = ttk.LabelFrame(frame, text="Troubleshooting", padding=5)
-        trouble_frame.grid(row=3, column=0, columnspan=3, pady=10, sticky="ew")
-        
-        ttk.Button(trouble_frame, text="Test Mag", command=self.send_mag,
-                   width=10).pack(side="left", padx=5)
-        ttk.Button(trouble_frame, text="Test Beam", command=self.send_beam,
                    width=10).pack(side="left", padx=5)
     
     def send_home(self):
         """Send home command."""
         self.serial_handler.send_command("home")
     
-    def send_position(self):
-        """Send position command."""
-        pos = self.position_combo.get()
-        if pos:
-            self.serial_handler.send_command(pos)
+    def send_position(self, position):
+        """
+        Send position command.
+        
+        Args:
+            position (int): Position number (1-12)
+        """
+        self.serial_handler.send_command(f"p{position}")
     
     def send_open(self):
         """Send manual door open command."""
@@ -264,18 +297,18 @@ class CarouselControlGUI:
         # Current file display
         ttk.Label(frame, text="Current File:").grid(row=0, column=0, sticky="w")
         self.file_label = ttk.Label(frame, text=self.data_logger.get_current_filename(), 
-                                    font=("Arial", 12, "bold"))
+                                    font=("Courier", 10))
         self.file_label.grid(row=0, column=1, sticky="w", padx=10)
         
         # Trial count
         ttk.Label(frame, text="Trials Today:").grid(row=0, column=2, sticky="w", padx=10)
-        self.trial_count_label = ttk.Label(frame, text="0", font=("Arial", 12))
+        self.trial_count_label = ttk.Label(frame, text="0", font=("Arial", 10))
         self.trial_count_label.grid(row=0, column=3, sticky="w")
         
         # Location
         ttk.Label(frame, text="Location:").grid(row=1, column=0, sticky="w")
         location_text = str(self.data_logger.data_folder.absolute())
-        self.location_label = ttk.Label(frame, text=location_text, font=("Courier", 8))
+        self.location_label = ttk.Label(frame, text=location_text, font=("Courier", 10))
         self.location_label.grid(row=1, column=1, columnspan=2, sticky="w", padx=10)
         
         # Open folder button
@@ -417,7 +450,7 @@ class CarouselControlGUI:
         try:
             parts = line.split(':')
             if len(parts) == 3:
-                field = parts[1]
+                field = parts[1].upper()  # Convert to uppercase for case-insensitive matching
                 value = parts[2]
                 
                 if field == "MAGNET":
@@ -437,14 +470,9 @@ class CarouselControlGUI:
                         self.mouse_label.config(foreground="orange")
                     elif value == "ENTERED":
                         self.mouse_label.config(foreground="green")
-                    elif value == "EXIT":
-                        self.mouse_label.config(foreground="orange")
                 
                 elif field == "POSITION":
-                    if value != "0":
-                        self.position_label.config(text=f"p{value}")
-                    else:
-                        self.position_label.config(text="Unknown")
+                    self.position_label.config(text=value)
                         
         except Exception as e:
             self.log_message(f"Error parsing status update: {e}", "ERROR")

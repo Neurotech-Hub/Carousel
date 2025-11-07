@@ -85,11 +85,11 @@ class DataLogger:
             data = {
                 'Trial': [trial],
                 'Position': [position],
+                'DwellTime(s)': [dwell_time],
+                'Door Event': [event],
+                'Timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],                
                 'EntryTime': [entry_time],
-                'ExitTime': [exit_time],
-                'DwellTime': [dwell_time],
-                'Event': [event],
-                'Timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+                'ExitTime': [exit_time]
             }
             
             df = pd.DataFrame(data)

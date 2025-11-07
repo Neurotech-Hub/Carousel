@@ -1,4 +1,4 @@
-# Carousel Controller GUI v1.4.0
+# Carousel Controller GUI v1.4
 
 Python GUI application for controlling the Carousel Controller and logging rat dwell time data to Excel.
 
@@ -209,7 +209,7 @@ For issues or questions:
 
 ## Version History
 
-### v1.4.0 (Current)
+### v1.4.x (Current)
 - Added dwell time tracking and Excel logging
 - Real-time status updates (Magnet State, Mouse Status)
 - Date-based Excel file management

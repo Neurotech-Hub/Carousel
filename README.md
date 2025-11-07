@@ -2,7 +2,7 @@
 
 Complete Arduino-based 12-position carousel controller with automatic door operation and dwell time data logging for behavioral experiments.
 
-## 🎯 New in v1.4.0
+## 🎯 New in v1.4
 
 - ✨ **Dwell Time Tracking**: Automatically records time spent in subchamber
 - 📊 **Excel Data Logging**: Date-based Excel files (Carousel_MMDDYY.xlsx)
