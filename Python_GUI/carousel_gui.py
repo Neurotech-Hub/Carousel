@@ -150,19 +150,19 @@ class CarouselControlGUI:
         frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         
         # Magnet State
-        ttk.Label(frame, text="Magnet State:", font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=5)
-        self.magnet_label = ttk.Label(frame, text="UNKNOWN", 
+        ttk.Label(frame, text="Magnet State:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", pady=5)
+        self.magnet_label = ttk.Label(frame, text="Unknown", 
                                       font=("Arial", 12, "bold"), foreground="gray")
         self.magnet_label.grid(row=0, column=1, sticky="w", pady=5, padx=10)
         
         # Mouse Status (renamed from Beam State)
-        ttk.Label(frame, text="Mouse Status:", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Mouse Status:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", pady=5)
         self.mouse_label = ttk.Label(frame, text="IDLE", 
-                                     font=("Arial", 12, "bold"), foreground="blue")
+                                     font=("Arial", 12, "bold"), foreground="light blue")
         self.mouse_label.grid(row=1, column=1, sticky="w", pady=5, padx=10)
         
         # Current Position
-        ttk.Label(frame, text="Position:", font=("Arial", 10)).grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Position:", font=("Arial", 12)).grid(row=2, column=0, sticky="w", pady=5)
         self.position_label = ttk.Label(frame, text="Unknown", 
                                        font=("Arial", 12, "bold"))
         self.position_label.grid(row=2, column=1, sticky="w", pady=5, padx=10)
@@ -264,12 +264,12 @@ class CarouselControlGUI:
         # Current file display
         ttk.Label(frame, text="Current File:").grid(row=0, column=0, sticky="w")
         self.file_label = ttk.Label(frame, text=self.data_logger.get_current_filename(), 
-                                    font=("Arial", 10, "bold"))
+                                    font=("Arial", 12, "bold"))
         self.file_label.grid(row=0, column=1, sticky="w", padx=10)
         
         # Trial count
         ttk.Label(frame, text="Trials Today:").grid(row=0, column=2, sticky="w", padx=10)
-        self.trial_count_label = ttk.Label(frame, text="0", font=("Arial", 10))
+        self.trial_count_label = ttk.Label(frame, text="0", font=("Arial", 12))
         self.trial_count_label.grid(row=0, column=3, sticky="w")
         
         # Location
