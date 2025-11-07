@@ -31,6 +31,7 @@ int magnetIntervals[12];          // Step intervals: [0]=p1→p2, [1]=p2→p3, .
 int currentPosition = 0;          // 0=uncalibrated, 1-12=calibrated position
 bool isCalibrated = false;        // Calibration status flag
 long currentStepPosition = 0;     // Track absolute stepper position for navigation
+int homingAdjustmentStep = 8;     // Temp: Homing requires few steps adjustments or sensor position adjustment.
 
 // System state variables
 bool waitingForCommand = true;
@@ -438,7 +439,7 @@ void moveServoSlow(Servo &servo, int targetPosition)
   int currentPosition = servo.read();
   int direction = (targetPosition > currentPosition) ? 1 : -1;
   
-  for (int pos = currentPosition; pos != targetPosition; pos += direction * 10)
+  for (int pos = currentPosition; pos != targetPosition; pos += direction * 5)
   {
     // Make sure we don't overshoot
     if ((direction == 1 && pos > targetPosition) || (direction == -1 && pos < targetPosition))
@@ -446,7 +447,7 @@ void moveServoSlow(Servo &servo, int targetPosition)
       pos = targetPosition;
     }
     servo.write(pos);
-    delay(20); // 20ms delay between 10-degree steps
+    delay(50); // 50ms delay between 5-degree steps
     
     if (pos == targetPosition) break;
   }
@@ -456,7 +457,7 @@ void openDoor()
 {
   Serial.println("Opening door...");
   moveServoSlow(servo1, 0);   // servo1 to 0 degrees
-  moveServoSlow(servo2, 180); // servo2 to 180 degrees
+  moveServoSlow(servo2, 180);   // servo2 to 180 degrees
 }
 
 void closeDoor()
@@ -767,7 +768,7 @@ void handleHomingCommand()
     }
     
     // Stop gently at MAG1
-    long currentPos = stepper.currentPosition();
+    long currentPos = stepper.currentPosition() + homingAdjustmentStep;
     stepper.moveTo(currentPos);
     while (stepper.run()) {} // Wait for stop
     
