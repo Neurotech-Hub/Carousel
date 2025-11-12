@@ -862,6 +862,17 @@ void handlePositionCommand(int targetPos)
   {
     Serial.print("Already at position p");
     Serial.println(targetPos);
+    
+    magnetState = ON_MAGNET;
+    waitingForCommand = true;
+    
+    // Trigger door cycle
+    if (isDoorCycleArmed)
+    {
+      Serial.println("Starting door cycle...");
+      automaticDoorCycle();
+      isDoorCycleArmed = false;
+    }
     return;
   }
   
